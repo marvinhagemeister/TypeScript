@@ -93,6 +93,7 @@ func (p *Plan) collectRenameEffects() error {
 
 // This is structural accounting, not proof that the mapper's claimed derivation is semantically
 // correct. The mapper owns language semantics; the host owns the frozen write footprint.
+// validateResponse has already checked input coverage, result structure and all authored ranges.
 func (p *Plan) validateRenameResponse(owner string, batch []GeneratedEdit, response Response) error {
 	enabled := false
 	for _, edit := range batch {
@@ -117,14 +118,9 @@ func (p *Plan) validateRenameResponse(owner string, batch []GeneratedEdit, respo
 		}
 	}
 	for _, result := range response.Results {
-		for _, edit := range result.Edits {
-			if edit.Document < 0 || edit.Document >= len(p.request.Documents) || p.request.Documents[edit.Document].Owner != owner || !validRange(p.request.Documents[edit.Document].Text, edit.Change.TextRange) {
-				return errors.New("edit projection: unauthorized authored document or invalid range")
-			}
-		}
 		for _, id := range result.DerivedEffects {
 			effect, ok := remaining[id]
-			if !ok || result.GeneratedOnly {
+			if !ok {
 				return errors.New("edit projection: unknown or duplicate derived effect")
 			}
 			rooted := false

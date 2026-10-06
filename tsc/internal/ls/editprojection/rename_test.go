@@ -25,7 +25,7 @@ func derivedFile() *ast.SourceFile {
 
 func TestDerivedRenameAccounting(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{"success", "missing", "duplicate", "unknown", "unrooted", "untouched", "widened", "supplemental", "generated-only", "stale", "cancel", "mutated-request"} {
+	for _, mode := range []string{"success", "missing", "duplicate", "unknown", "unrooted", "untouched", "widened", "supplemental", "generated-only", "stale", "cancel", "mutated-request", "foreign-document", "negative-document", "out-of-bounds"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 			file := derivedFile()
@@ -40,6 +40,12 @@ func TestDerivedRenameAccounting(t *testing.T) {
 				coverage := Result{Inputs: []int{0}, DerivedEffects: []int{req.Effects[0].ID}, Edits: []AuthoredEdit{{Document: 0, Change: change(0, 9, "next-item")}}}
 				response := Response{Snapshot: req.Snapshot}
 				switch mode {
+				case "foreign-document":
+					coverage.Edits = append(coverage.Edits, AuthoredEdit{Document: 99, Change: change(0, 0, "bad")})
+				case "negative-document":
+					coverage.Edits = append(coverage.Edits, AuthoredEdit{Document: -1, Change: change(0, 0, "bad")})
+				case "out-of-bounds":
+					coverage.Edits = append(coverage.Edits, AuthoredEdit{Document: 0, Change: change(15, 100, "bad")})
 				case "missing":
 					coverage.DerivedEffects = nil
 				case "duplicate":
@@ -127,7 +133,7 @@ func TestRenameRejectsConflictingProjectViews(t *testing.T) {
 	t.Parallel()
 	file := mappedFile("save-item", "saveItem", spanmap.KindAtom)
 	// Same AST and transform identity, different editing contexts: never choose an arbitrary handle.
-	_, err := NewPlan(Snapshot{ID: "1"}, Operation{Kind: Rename}, []SourceEdit{{File: file, Context: "first", Owner: "first", Change: change(0, 8, "nextItem")}},
+	_, err := NewPlan(Snapshot{ID: "1"}, Operation{Kind: Rename}, []SourceEdit{{File: file, Context: "first", Change: change(0, 8, "nextItem")}},
 		SourceProjection{File: file, Context: "first", Owner: "first", DerivedRename: true}, SourceProjection{File: file, Context: "second", Owner: "second", DerivedRename: true})
 	assert.ErrorContains(t, err, "inconsistent projections")
 }
@@ -183,7 +189,7 @@ func TestDerivedEffectCannotAcknowledgeAnotherOwner(t *testing.T) {
 	first := derivedFile()
 	second := parser.ParseSourceFile(ast.SourceFileParseOptions{FileName: "/other.vue", PathKey: "/other.vue"}, first.Text(), core.ScriptKindTS)
 	second.SetContentMapperInfo(ast.ContentMapperSourceFileInfo{ContentMapper: "test", OriginalText: first.OriginalText(), SpanMap: first.SpanMap(), TransformIdentity: "mapper-v1"})
-	plan, err := NewPlan(Snapshot{ID: "1"}, Operation{Kind: Rename}, []SourceEdit{{File: first, Owner: "first", Change: change(0, 8, "nextItem")}, {File: second, Owner: "second", Change: change(0, 8, "nextItem")}}, SourceProjection{File: first, Owner: "first", DerivedRename: true}, SourceProjection{File: second, Owner: "second", DerivedRename: true})
+	plan, err := NewPlan(Snapshot{ID: "1"}, Operation{Kind: Rename}, []SourceEdit{{File: first, Change: change(0, 8, "nextItem")}, {File: second, Change: change(0, 8, "nextItem")}}, SourceProjection{File: first, Owner: "first", DerivedRename: true}, SourceProjection{File: second, Owner: "second", DerivedRename: true})
 	assert.NilError(t, err)
 	provider := func(_ context.Context, req Request) (Response, error) {
 		assert.Equal(t, req.Effects[0].ID, 0)
@@ -200,7 +206,7 @@ func TestDerivedEffectCannotAcknowledgeAnotherOwner(t *testing.T) {
 func TestRenameRejectsContradictoryProjectionAuthority(t *testing.T) {
 	t.Parallel()
 	file := derivedFile()
-	_, err := NewPlan(Snapshot{ID: "1"}, Operation{Kind: Rename}, []SourceEdit{{File: file, Owner: "first", Change: change(0, 8, "nextItem")}}, SourceProjection{File: file, Owner: "second", DerivedRename: true})
+	_, err := NewPlan(Snapshot{ID: "1"}, Operation{Kind: Rename}, []SourceEdit{{File: file, Change: change(0, 8, "nextItem")}}, SourceProjection{File: file, Owner: "first", DerivedRename: true}, SourceProjection{File: file, Owner: "second", DerivedRename: true})
 	assert.ErrorContains(t, err, "inconsistent projection context")
 	_, err = NewPlan(Snapshot{ID: "1"}, Operation{Kind: Rename}, []SourceEdit{{File: file, Change: change(0, 8, "nextItem")}}, SourceProjection{File: file, DerivedRename: true}, SourceProjection{File: file})
 	assert.ErrorContains(t, err, "inconsistent projection context")

@@ -1,5 +1,5 @@
 // Package editprojection prototypes the boundary between generated semantic edits and authored edits.
-// It is not a public API or an extension to the content-mapper wire protocol. See README.md.
+// It is an internal model; the experimental mapper RPC adapter is separate. See README.md.
 package editprojection
 
 import (
@@ -42,14 +42,13 @@ type Snapshot struct {
 type SourceEdit struct {
 	File   *ast.SourceFile
 	Change core.TextChange
-	// Owner optionally scopes a provider to a particular mapper configuration.
-	Owner string
 	// Context distinguishes programs even when their cached SourceFile objects are shared.
 	Context string
 }
 
 // SourceProjection includes edit-free generated views of an authorized authored document.
-// Callers must supply every view in the frozen operation's projects.
+// This is the authority for provider ownership and capabilities. Callers must supply every view in
+// the frozen operation's projects; only documents containing native edits are authorized.
 type SourceProjection struct {
 	File          *ast.SourceFile
 	Owner         string
@@ -139,75 +138,63 @@ func NewPlan(snapshot Snapshot, operation Operation, edits []SourceEdit, views .
 	}
 	projections := make(map[viewKey]int)
 	identities := make(map[tspath.RootedFilePath]string)
-	options := make(map[viewKey]SourceProjection)
+	catalogue := make(map[viewKey]SourceProjection)
 	for _, view := range views {
 		key := viewKey{view.File, view.Context}
-		if previous, exists := options[key]; exists && previous != view {
+		if previous, exists := catalogue[key]; exists && previous != view {
 			return nil, errors.New("edit projection: inconsistent projection context")
 		}
-		options[key] = view
+		catalogue[key] = view
 	}
-	register := func(view SourceProjection) (int, error) {
-		file := view.File
+	register := func(key viewKey) (int, error) {
+		file := key.file
 		if file == nil || file.IsContentMapperFailureStub() {
 			return 0, errors.New("edit projection: invalid generated projection")
 		}
+		if id, exists := projections[key]; exists {
+			return id, nil
+		}
+		// Metadata comes only from the catalogue; undeclared views retain the strict defaults.
+		view := catalogue[key]
 		owner := view.Owner
 		if owner == "" {
 			owner = file.ContentMapper()
 		}
-		key := viewKey{file, view.Context}
-		projectionID, exists := projections[key]
-		if !exists {
-			name := file.OriginalFileName()
-			documentID, exists := documents[name]
-			if exists {
-				document := plan.request.Documents[documentID]
-				if document.Text != file.OriginalText() || document.Owner != owner || identities[name] != file.ContentMapperTransformIdentity() {
-					return 0, fmt.Errorf("edit projection: inconsistent projections for %s", name)
-				}
-			} else {
-				documentID = len(plan.request.Documents)
-				document := Document{ID: documentID, FileName: name, Text: file.OriginalText(), Owner: owner}
-				if version, ok := snapshot.Versions[name.AsString()]; ok {
-					document.Version = new(version)
-				}
-				plan.request.Documents = append(plan.request.Documents, document)
-				documents[name] = documentID
-				identities[name] = file.ContentMapperTransformIdentity()
+		name := file.OriginalFileName()
+		documentID, exists := documents[name]
+		if exists {
+			document := plan.request.Documents[documentID]
+			if document.Text != file.OriginalText() || document.Owner != owner || identities[name] != file.ContentMapperTransformIdentity() {
+				return 0, fmt.Errorf("edit projection: inconsistent projections for %s", name)
 			}
-			projectionID = len(plan.request.Projections)
-			projection := Projection{ID: projectionID, Document: documentID, FileName: file.FileName(), Text: file.Text(), TransformIdentity: file.ContentMapperTransformIdentity(), DerivedRename: view.DerivedRename}
-			if mapping := file.SpanMap(); mapping != nil {
-				if err := mapping.Validate(file.Text(), file.OriginalText()); err != nil {
-					return 0, err
-				}
-				projection.Mapped = true
-				projection.Mappings = slices.Clone(mapping.Segments())
-			}
-			plan.request.Projections = append(plan.request.Projections, projection)
-			projections[key] = projectionID
 		} else {
-			projection := plan.request.Projections[projectionID]
-			if plan.request.Documents[projection.Document].Owner != owner || projection.DerivedRename != view.DerivedRename {
-				return 0, errors.New("edit projection: inconsistent projection context")
+			documentID = len(plan.request.Documents)
+			document := Document{ID: documentID, FileName: name, Text: file.OriginalText(), Owner: owner}
+			if version, ok := snapshot.Versions[name.AsString()]; ok {
+				document.Version = new(version)
 			}
+			plan.request.Documents = append(plan.request.Documents, document)
+			documents[name] = documentID
+			identities[name] = file.ContentMapperTransformIdentity()
 		}
+		projectionID := len(plan.request.Projections)
+		projection := Projection{ID: projectionID, Document: documentID, FileName: file.FileName(), Text: file.Text(), TransformIdentity: file.ContentMapperTransformIdentity(), DerivedRename: view.DerivedRename}
+		if mapping := file.SpanMap(); mapping != nil {
+			if err := mapping.Validate(file.Text(), file.OriginalText()); err != nil {
+				return 0, err
+			}
+			projection.Mapped = true
+			projection.Mappings = slices.Clone(mapping.Segments())
+		}
+		plan.request.Projections = append(plan.request.Projections, projection)
+		projections[key] = projectionID
 		return projectionID, nil
 	}
 	for _, edit := range edits {
 		if edit.File == nil || !validRange(edit.File.Text(), edit.Change.TextRange) {
 			return nil, errors.New("edit projection: invalid generated edit")
 		}
-		view := options[viewKey{edit.File, edit.Context}]
-		view.File, view.Context = edit.File, edit.Context
-		if edit.Owner != "" {
-			if view.Owner != "" && view.Owner != edit.Owner {
-				return nil, errors.New("edit projection: inconsistent projection context")
-			}
-			view.Owner = edit.Owner
-		}
-		id, err := register(view)
+		id, err := register(viewKey{edit.File, edit.Context})
 		if err != nil {
 			return nil, err
 		}
@@ -220,7 +207,7 @@ func NewPlan(snapshot Snapshot, operation Operation, edits []SourceEdit, views .
 		if _, authorized := documents[view.File.OriginalFileName()]; !authorized {
 			continue
 		}
-		if _, err := register(view); err != nil {
+		if _, err := register(viewKey{view.File, view.Context}); err != nil {
 			return nil, err
 		}
 	}
@@ -348,13 +335,11 @@ func (p *Plan) validateResponse(owner string, batch []GeneratedEdit, response Re
 		remaining[edit.ID] = edit
 	}
 	var edits []AuthoredEdit
-	if p.request.Operation.Kind == Rename {
-		if err := p.validateRenameResponse(owner, batch, response); err != nil {
-			return nil, err
-		}
-	}
 	for _, result := range response.Results {
-		if len(result.Inputs) == 0 || result.GeneratedOnly && (len(result.Edits) != 0 || len(result.DerivedEffects) != 0 || result.Reason == "") || !result.GeneratedOnly && len(result.Edits) == 0 || p.request.Operation.Kind != Rename && len(result.DerivedEffects) != 0 {
+		if len(result.Inputs) == 0 ||
+			result.GeneratedOnly && (len(result.Edits) != 0 || len(result.DerivedEffects) != 0 || result.Reason == "") ||
+			!result.GeneratedOnly && len(result.Edits) == 0 ||
+			p.request.Operation.Kind != Rename && len(result.DerivedEffects) != 0 {
 			return nil, errors.New("edit projection: invalid coverage result")
 		}
 		for _, id := range result.Inputs {
@@ -371,11 +356,19 @@ func (p *Plan) validateResponse(owner string, batch []GeneratedEdit, response Re
 			if edit.Document < 0 || edit.Document >= len(p.request.Documents) || p.request.Documents[edit.Document].Owner != owner {
 				return nil, errors.New("edit projection: unauthorized authored document")
 			}
+			if !validRange(p.request.Documents[edit.Document].Text, edit.Change.TextRange) {
+				return nil, errors.New("edit projection: invalid authored range")
+			}
 			edits = append(edits, edit)
 		}
 	}
 	if len(remaining) != 0 {
 		return nil, errors.New("edit projection: incomplete coverage")
+	}
+	if p.request.Operation.Kind == Rename {
+		if err := p.validateRenameResponse(owner, batch, response); err != nil {
+			return nil, err
+		}
 	}
 	return edits, nil
 }

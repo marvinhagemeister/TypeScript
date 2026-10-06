@@ -80,7 +80,9 @@ func (r *mapperEditRoute) provider(ctx context.Context, request editprojection.R
 		return editprojection.Response{}, err
 	}
 	params := contentmapper.ProjectEditsParams{Snapshot: request.Snapshot, Operation: string(request.Operation.Kind), NewName: request.Operation.NewName, ImportAction: string(request.Operation.ImportAction)}
+	documentLengths := make(map[int]int, len(request.Documents))
 	for _, doc := range request.Documents {
+		documentLengths[doc.ID] = len(doc.Text)
 		params.Documents = append(params.Documents, contentmapper.EditDocument{ID: doc.ID, FileName: doc.FileName.AsString(), Text: doc.Text, Version: doc.Version})
 	}
 	for _, projection := range request.Projections {
@@ -111,14 +113,8 @@ func (r *mapperEditRoute) provider(ctx context.Context, request editprojection.R
 		coverage := editprojection.Result{Inputs: result.Inputs, GeneratedOnly: result.GeneratedOnly, Reason: result.Reason, DerivedEffects: result.DerivedEffects}
 		for _, edit := range result.Edits {
 			// Validate wire integers before narrowing them to core.TextPos (int32).
-			valid := false
-			for _, document := range request.Documents {
-				if document.ID == edit.Document && edit.Start >= 0 && edit.End >= edit.Start && edit.End <= len(document.Text) {
-					valid = true
-					break
-				}
-			}
-			if !valid {
+			length, authorized := documentLengths[edit.Document]
+			if !authorized || edit.Start < 0 || edit.End < edit.Start || edit.End > length {
 				return editprojection.Response{}, errors.New("content mapper returned an unauthorized document or invalid edit range")
 			}
 			coverage.Edits = append(coverage.Edits, editprojection.AuthoredEdit{Document: edit.Document, Change: core.TextChange{TextRange: core.NewTextRange(edit.Start, edit.End), NewText: edit.NewText}})
@@ -383,12 +379,10 @@ func (s *Server) mapperRenameWork(ctx context.Context, params *lsproto.RenamePar
 			}
 			providers := make(map[string]editprojection.Provider)
 			var sources []*ast.SourceFile
-			for i := range edits {
-				sources = append(sources, edits[i].File)
-				if route := routes[routeKey{edits[i].File, edits[i].Context}]; route != nil {
-					owner := route.owner(edits[i].Context)
-					edits[i].Owner = owner
-					providers[owner] = route.provider
+			for _, edit := range edits {
+				sources = append(sources, edit.File)
+				if route := routes[routeKey{edit.File, edit.Context}]; route != nil {
+					providers[route.owner(edit.Context)] = route.provider
 				}
 			}
 			if len(providers) == 0 {

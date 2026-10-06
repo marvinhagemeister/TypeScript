@@ -215,6 +215,34 @@ func TestProjectionRejectsEditingAnotherOwnersDocument(t *testing.T) {
 	assert.Assert(t, result == nil)
 }
 
+func TestProjectionCatalogueDoesNotAuthorizeDocuments(t *testing.T) {
+	t.Parallel()
+	file := mappedFile("save-item", "saveItem", spanmap.KindAtom)
+	other := parser.ParseSourceFile(ast.SourceFileParseOptions{FileName: "/other.ts", PathKey: "/other.ts"}, "saveItem", core.ScriptKindTS)
+	view := SourceProjection{File: file, Context: "project", Owner: "scoped"}
+	plan, err := NewPlan(Snapshot{ID: "1"}, Operation{Kind: Rename}, []SourceEdit{
+		{File: file, Context: "project", Change: change(0, 8, "nextItem")},
+		{File: file, Context: "project", Change: change(0, 8, "nextItem")},
+	}, view, view, SourceProjection{File: other, Context: "project", Owner: "scoped"})
+	assert.NilError(t, err)
+	for _, destination := range []int{0, 1} {
+		result, err := plan.Project(t.Context(), map[string]Provider{"scoped": func(_ context.Context, req Request) (Response, error) {
+			assert.Equal(t, len(req.Documents), 1)
+			assert.Equal(t, req.Documents[0].Owner, "scoped")
+			assert.Equal(t, len(req.Projections), 1)
+			assert.Equal(t, len(req.Edits), 2)
+			return Response{Snapshot: req.Snapshot, Results: []Result{{Inputs: []int{0, 1}, Edits: []AuthoredEdit{{Document: destination, Change: change(0, 9, "next-item")}}}}}, nil
+		}}, func() string { return "1" }, lsproto.PositionEncodingKindUTF8)
+		if destination == 0 {
+			assert.NilError(t, err)
+			assert.Equal(t, len(*result.DocumentChanges), 1)
+		} else {
+			assert.ErrorContains(t, err, "unauthorized")
+			assert.Assert(t, result == nil)
+		}
+	}
+}
+
 func change(start, end int, text string) core.TextChange {
 	return core.TextChange{TextRange: core.NewTextRange(start, end), NewText: text}
 }
