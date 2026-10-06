@@ -78,11 +78,17 @@ func TestProjectionRejectsInvalidResponses(t *testing.T) {
 func TestProjectionDeduplicatesAndVersionsEdits(t *testing.T) {
 	t.Parallel()
 	file := mappedFile("save-item", "saveItem", spanmap.KindAtom)
-	supplemental := parser.ParseSourceFile(ast.SourceFileParseOptions{FileName: "/app.vue.0.ts", PathKey: "/app.vue.0.ts"}, file.Text(), core.ScriptKindTS)
-	supplemental.SetContentMapperInfo(ast.ContentMapperSourceFileInfo{ContentMapper: "test", OriginalText: file.OriginalText(), SpanMap: file.SpanMap(), CanonicalSourceFile: file, TransformIdentity: "mapper-v1"})
+	// Sharing a document/owner must not share geometry: each projection has different offsets.
+	supplemental := parser.ParseSourceFile(ast.SourceFileParseOptions{FileName: "/app.vue.0.ts", PathKey: "/app.vue.0.ts"}, "let saveItem;", core.ScriptKindTS)
+	supplemental.SetContentMapperInfo(ast.ContentMapperSourceFileInfo{
+		ContentMapper: "test", OriginalText: file.OriginalText(), CanonicalSourceFile: file, TransformIdentity: "mapper-v1",
+		SpanMap: spanmap.New([]spanmap.Segment{{VirtualStart: 4, VirtualEnd: 12, OriginalEnd: 9, Kind: spanmap.KindAtom, Features: spanmap.FeatureAll}}),
+	})
 	plan, err := NewPlan(Snapshot{ID: "1", Versions: map[string]int32{"/app.vue": 7}}, Operation{Kind: Rename, NewName: "nextItem"}, []SourceEdit{
 		{File: file, Change: change(0, 8, "nextItem")},
-		{File: supplemental, Change: change(0, 8, "nextItem")},
+		{File: supplemental, Change: change(4, 12, "nextItem")},
+		{File: file, Change: change(0, 8, "nextItem")},
+		{File: supplemental, Change: change(4, 12, "nextItem")},
 	})
 	assert.NilError(t, err)
 	calls := 0

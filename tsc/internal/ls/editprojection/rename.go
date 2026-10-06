@@ -55,9 +55,16 @@ func (p *Plan) collectRenameEffects() error {
 		covered[renameSpan{edit.Projection, edit.Change.TextRange}] = true
 	}
 	effects := make(map[renameSpan]int)
+	// Geometry is frozen for this plan. Build each source map once, not once per occurrence.
+	mappings := make(map[int]*spanmap.SpanMap)
 	for _, edit := range p.request.Edits {
 		source := p.request.Projections[edit.Projection]
-		original, fidelity := projectionMapping(source).VirtualToOriginalSpan(edit.Change.TextRange)
+		mapping, exists := mappings[edit.Projection]
+		if !exists {
+			mapping = projectionMapping(source)
+			mappings[edit.Projection] = mapping
+		}
+		original, fidelity := mapping.VirtualToOriginalSpan(edit.Change.TextRange)
 		if fidelity.IsNone() {
 			continue
 		}
