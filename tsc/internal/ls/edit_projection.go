@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"slices"
 
 	"github.com/microsoft/TypeScript/tsc/internal/ast"
@@ -87,26 +88,50 @@ func (l *LanguageService) resolveProjectedRename(ctx context.Context, uri lsprot
 	return selectedFile, selectedNode, selectedInfo, nil
 }
 
-// GetRenameEditPlan computes a complete single-program rename before authored projection. The
-// experimental contract accepts canonical identifiers only and repeats preparation independently.
-// A production cross-project adapter must collect all programs' edits before creating the final plan.
+// GetRenameEditPlan is the single-program convenience entry point for internal callers.
 func (l *LanguageService) GetRenameEditPlan(ctx context.Context, params *lsproto.RenameParams, snapshot editprojection.Snapshot) (*editprojection.Plan, error) {
 	if !scanner.IsValidIdentifier(params.NewName) || scanner.GetIdentifierToken(params.NewName) != ast.KindIdentifier {
 		return nil, errors.New("edit projection: expected a canonical identifier")
 	}
+	edits, err := l.GetRenameEdits(ctx, params, nil)
+	if err != nil {
+		return nil, err
+	}
+	return editprojection.NewPlan(snapshot, editprojection.Operation{Kind: editprojection.Rename, NewName: params.NewName}, edits)
+}
+
+// GetRenameEdits materializes generated edits across the orchestrator's programs before any projection.
+// Callers must supply an orchestrator bound to one retained snapshot and validate the combined plan.
+func (l *LanguageService) GetRenameEdits(ctx context.Context, params *lsproto.RenameParams, orchestrator CrossProjectOrchestrator) ([]editprojection.SourceEdit, error) {
 	file, node, _, err := l.resolveProjectedRename(ctx, params.TextDocument.Uri, params.Position)
 	if err != nil {
 		return nil, err
 	}
-	entries := l.getSymbolAndEntries(ctx, astnav.GetStartOfNode(node, file, false), node, l.program, true, false)
-	edits, err := l.materializeRenameEdits(ctx, file, node, params.NewName, entries)
+	position := astnav.GetStartOfNode(node, file, false)
+	data := SymbolAndEntriesData{OriginalNode: node, Position: position, SymbolsAndEntries: l.getSymbolAndEntries(ctx, position, node, l.program, true, false)}
+	return l.handleCrossProject(ctx, params, orchestrator, (*LanguageService).symbolAndEntriesToGeneratedEdits,
+		func(results iter.Seq[[]editprojection.SourceEdit]) []editprojection.SourceEdit {
+			var edits []editprojection.SourceEdit
+			for batch := range results {
+				edits = append(edits, batch...)
+			}
+			return edits
+		}, true, false, symbolEntryTransformOptions{}, &data)
+}
+
+func (l *LanguageService) symbolAndEntriesToGeneratedEdits(ctx context.Context, params *lsproto.RenameParams, data SymbolAndEntriesData, _ symbolEntryTransformOptions) ([]editprojection.SourceEdit, error) {
+	if data.OriginalNode == nil || len(data.SymbolsAndEntries) == 0 {
+		return nil, nil
+	}
+	file := ast.GetSourceFileOfNode(data.OriginalNode)
+	edits, err := l.materializeRenameEdits(ctx, file, data.OriginalNode, params.NewName, data.SymbolsAndEntries)
 	if err != nil {
 		return nil, err
 	}
 	if err := l.checkRenameProjectionCoverage(edits); err != nil {
 		return nil, err
 	}
-	return editprojection.NewPlan(snapshot, editprojection.Operation{Kind: editprojection.Rename, NewName: params.NewName}, edits)
+	return edits, nil
 }
 
 // An authored token can feed multiple generated symbols. Updating it for just one of them would

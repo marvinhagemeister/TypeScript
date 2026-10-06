@@ -77,16 +77,38 @@ var codeFixProviders = []*CodeFixProvider{
 
 // ProvideCodeActions returns code actions for the given range and context
 func (l *LanguageService) ProvideCodeActions(ctx context.Context, params *lsproto.CodeActionParams) (lsproto.CodeActionResponse, error) {
+	return l.ProvideCodeActionsWithImportProjection(ctx, params, nil)
+}
+
+// ProvideCodeActionsWithImportProjection replaces, rather than supplements, the built-in import action.
+// Other action kinds use the existing providers. A nil callback preserves legacy behavior.
+func (l *LanguageService) ProvideCodeActionsWithImportProjection(ctx context.Context, params *lsproto.CodeActionParams, projectImports func(lsproto.CodeActionKind) (*lsproto.WorkspaceEdit, error)) (lsproto.CodeActionResponse, error) {
 	program, file := l.getProgramAndFile(params.TextDocument.Uri)
 
 	var actions []lsproto.CommandOrCodeAction
+	seenProjectedImports := make(map[lsproto.CodeActionKind]bool)
 
 	if params.Context != nil && params.Context.Only != nil {
 		for _, kind := range *params.Context.Only {
 			matchingKinds := getOrganizeImportsActionsForKind(kind)
 			for _, matchingKind := range matchingKinds {
-				organizeAction := l.createOrganizeImportsAction(ctx, program, file, matchingKind)
-				actions = append(actions, *organizeAction)
+				if projectImports != nil {
+					if seenProjectedImports[matchingKind] {
+						continue
+					}
+					seenProjectedImports[matchingKind] = true
+					edit, err := projectImports(matchingKind)
+					if err != nil {
+						return lsproto.CodeActionResponse{}, err
+					}
+					if edit == nil || edit.DocumentChanges == nil || len(*edit.DocumentChanges) == 0 {
+						continue
+					}
+					actions = append(actions, lsproto.CommandOrCodeAction{CodeAction: &lsproto.CodeAction{Title: getOrganizeImportsActionTitle(ctx, matchingKind), Kind: new(matchingKind), Edit: edit}})
+				} else {
+					organizeAction := l.createOrganizeImportsAction(ctx, program, file, matchingKind)
+					actions = append(actions, *organizeAction)
+				}
 			}
 
 			if isFixAllKind(kind) {

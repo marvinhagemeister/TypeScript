@@ -17,6 +17,8 @@ import (
 	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 )
 
+var ErrStaleSnapshot = errors.New("edit projection: stale snapshot")
+
 type Kind string
 
 const (
@@ -40,6 +42,8 @@ type Snapshot struct {
 type SourceEdit struct {
 	File   *ast.SourceFile
 	Change core.TextChange
+	// Owner optionally scopes a provider to a particular mapper configuration.
+	Owner string
 }
 
 type Document struct {
@@ -113,18 +117,22 @@ func NewPlan(snapshot Snapshot, operation Operation, edits []SourceEdit) (*Plan,
 		if file == nil || file.IsContentMapperFailureStub() || !validRange(file.Text(), edit.Change.TextRange) {
 			return nil, errors.New("edit projection: invalid generated edit")
 		}
+		owner := edit.Owner
+		if owner == "" {
+			owner = file.ContentMapper()
+		}
 		projectionID, exists := projections[file]
 		if !exists {
 			name := file.OriginalFileName()
 			documentID, exists := documents[name]
 			if exists {
 				document := plan.request.Documents[documentID]
-				if document.Text != file.OriginalText() || document.Owner != file.ContentMapper() || identities[name] != file.ContentMapperTransformIdentity() {
+				if document.Text != file.OriginalText() || document.Owner != owner || identities[name] != file.ContentMapperTransformIdentity() {
 					return nil, fmt.Errorf("edit projection: inconsistent projections for %s", name)
 				}
 			} else {
 				documentID = len(plan.request.Documents)
-				document := Document{ID: documentID, FileName: name, Text: file.OriginalText(), Owner: file.ContentMapper()}
+				document := Document{ID: documentID, FileName: name, Text: file.OriginalText(), Owner: owner}
 				if version, ok := snapshot.Versions[name.AsString()]; ok {
 					document.Version = new(version)
 				}
@@ -158,7 +166,7 @@ func (p *Plan) Project(ctx context.Context, providers map[string]Provider, curre
 			return err
 		}
 		if currentSnapshot == nil || currentSnapshot() != p.request.Snapshot {
-			return errors.New("edit projection: stale snapshot")
+			return ErrStaleSnapshot
 		}
 		return nil
 	}
@@ -332,6 +340,9 @@ func (p *Plan) workspaceEdit(edits []AuthoredEdit, encoding lsproto.PositionEnco
 		}
 		unique = append(unique, edit)
 	}
+	unique = slices.DeleteFunc(unique, func(edit AuthoredEdit) bool {
+		return p.request.Documents[edit.Document].Text[edit.Change.Pos():edit.Change.End()] == edit.Change.NewText
+	})
 	var changes []lsproto.TextDocumentEditOrCreateFileOrRenameFileOrDeleteFile
 	next := 0
 	for _, document := range p.request.Documents {

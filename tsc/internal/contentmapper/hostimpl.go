@@ -65,6 +65,8 @@ type OpenProjectParams struct {
 	Options json.Value `json:"options,omitempty"`
 	// CompilerOptions contains the project's effective compiler options.
 	CompilerOptions json.Value `json:"compilerOptions"`
+	// EditProjectionVersion advertises the optional editing protocol the host understands.
+	EditProjectionVersion int `json:"editProjectionVersion,omitempty"`
 }
 
 // OpenProjectResult is the mapper's response to an openProject request. ConfigIdentity and WatchedFiles
@@ -75,7 +77,8 @@ type OpenProjectResult struct {
 	// WatchedFiles are absolute files whose changes may alter ConfigIdentity or transform output.
 	WatchedFiles []string `json:"watchedFiles,omitempty"`
 	// OptionDiagnostics report invalid mapper options. Paths are relative to the mapper entry's options object.
-	OptionDiagnostics []OptionDiagnosticResult `json:"optionDiagnostics,omitempty"`
+	OptionDiagnostics []OptionDiagnosticResult    `json:"optionDiagnostics,omitempty"`
+	EditProjection    *EditProjectionCapabilities `json:"editProjection,omitempty"`
 }
 
 type OptionDiagnosticResult struct {
@@ -243,6 +246,7 @@ type projectEntry struct {
 	configIdentity    string
 	watchedFiles      []tspath.RootedFilePath
 	optionDiagnostics []OptionDiagnostic
+	editProjection    EditProjectionCapabilities
 }
 
 type mapperConn struct {
@@ -662,10 +666,11 @@ func (h *host) openProjectLocked(ctx context.Context, entry *projectEntry) error
 	mapperTiming := h.timing.mapper(entry.mapper.Identity())
 	start := mapperTiming.startRequest()
 	raw, err := conn.Call(ctx, MethodOpenProject, OpenProjectParams{
-		ConfigFileName:  entry.spec.ConfigFileName.AsString(),
-		ProjectHandle:   entry.projectHandle,
-		Options:         entry.mapper.Options,
-		CompilerOptions: compilerOptions,
+		ConfigFileName:        entry.spec.ConfigFileName.AsString(),
+		ProjectHandle:         entry.projectHandle,
+		Options:               entry.mapper.Options,
+		CompilerOptions:       compilerOptions,
+		EditProjectionVersion: EditProjectionVersion,
 	})
 	mapperTiming.finishRequest(&mapperTiming.openProject, start)
 	if err != nil {
@@ -683,6 +688,13 @@ func (h *host) openProjectLocked(ctx context.Context, entry *projectEntry) error
 	}
 	if !entry.mapper.DynamicConfig && len(result.WatchedFiles) != 0 {
 		return &ProjectError{Kind: ProjectErrorKindUnexpectedWatchedFiles}
+	}
+	entry.editProjection = EditProjectionCapabilities{}
+	if result.EditProjection != nil {
+		if result.EditProjection.Version != EditProjectionVersion {
+			return &ProjectError{Kind: ProjectErrorKindMalformedResponse}
+		}
+		entry.editProjection = *result.EditProjection
 	}
 	entry.configIdentity = result.ConfigIdentity
 	entry.watchedFiles = make([]tspath.RootedFilePath, len(result.WatchedFiles))

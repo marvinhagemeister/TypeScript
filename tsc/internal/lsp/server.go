@@ -1295,7 +1295,6 @@ var handlers = sync.OnceValue(func() handlerMap {
 	handlers.registerLanguageServiceDocumentRequestHandler(lsproto.TextDocumentSelectionRangeInfo, (*Server).handleSelectionRange)
 	handlers.registerLanguageServiceDocumentRequestHandler(lsproto.TextDocumentInlayHintInfo, (*Server).handleInlayHint)
 	handlers.registerLanguageServiceDocumentRequestHandler(lsproto.TextDocumentCodeLensInfo, (*Server).handleCodeLens)
-	handlers.registerLanguageServiceDocumentRequestHandler(lsproto.TextDocumentCodeActionInfo, (*Server).handleCodeAction)
 	handlers.registerLanguageServiceDocumentRequestHandler(lsproto.TextDocumentPrepareCallHierarchyInfo, (*Server).handlePrepareCallHierarchy)
 	handlers.registerLanguageServiceDocumentRequestHandler(lsproto.TextDocumentFoldingRangeInfo, (*Server).handleFoldingRange)
 	handlers.registerLanguageServiceDocumentRequestHandler(lsproto.TextDocumentPrepareRenameInfo, (*Server).handlePrepareRename)
@@ -1308,7 +1307,7 @@ var handlers = sync.OnceValue(func() handlerMap {
 
 	handlers.registerMultiProjectReferenceRequestHandler(lsproto.TextDocumentReferencesInfo, (*ls.LanguageService).ProvideReferences)
 	handlers.registerMultiProjectReferenceRequestHandler(lsproto.TextDocumentVSReferencesInfo, (*ls.LanguageService).ProvideVSReferences)
-	handlers.registerRequestHandler(lsproto.TextDocumentRenameInfo, (*Server).handleRename)
+	handlers[lsproto.MethodTextDocumentRename] = (*Server).handleRenameRequest
 	handlers.registerMultiProjectReferenceRequestHandler(lsproto.TextDocumentImplementationInfo, (*ls.LanguageService).ProvideImplementations)
 
 	handlers.registerRequestHandler(lsproto.CallHierarchyIncomingCallsInfo, (*Server).handleCallHierarchyIncomingCalls)
@@ -1949,7 +1948,13 @@ func (s *Server) handleHover(ctx context.Context, ls *ls.LanguageService, params
 }
 
 func (s *Server) handlePrepareRename(ctx context.Context, languageService *ls.LanguageService, params *lsproto.PrepareRenameParams) (lsproto.PrepareRenameResponse, error) {
-	info := languageService.GetRenameInfo(ctx, "" /*newName*/, params.TextDocument.Uri, params.Position)
+	info, handled, err := s.tryPrepareMapperRename(ctx, languageService, params)
+	if err != nil {
+		return lsproto.PrepareRenameResponse{}, mapperEditError(err)
+	}
+	if !handled {
+		info = languageService.GetRenameInfo(ctx, "" /*newName*/, params.TextDocument.Uri, params.Position)
+	}
 	if !info.CanRename {
 		return lsproto.PrepareRenameResponse{}, userFacingRequestFailedError(info.LocalizedErrorMessage)
 	}
@@ -2251,6 +2256,12 @@ func (s *Server) handleSelectionRange(ctx context.Context, ls *ls.LanguageServic
 }
 
 func (s *Server) handleCodeAction(ctx context.Context, ls *ls.LanguageService, params *lsproto.CodeActionParams) (lsproto.CodeActionResponse, error) {
+	if result, handled, err := s.tryMapperImportActions(ctx, ls, params); handled {
+		if err != nil {
+			return lsproto.CodeActionResponse{}, mapperEditError(err)
+		}
+		return result, nil
+	}
 	return ls.ProvideCodeActions(ctx, params)
 }
 

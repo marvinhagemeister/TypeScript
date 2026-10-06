@@ -734,6 +734,13 @@ func (s *Snapshot) ref() {
 	}
 }
 
+// Retain keeps an already-retained snapshot alive for asynchronous request work. The caller must
+// invoke the returned release function exactly once, including on cancellation or failure.
+func (s *Snapshot) Retain() func() {
+	s.ref()
+	return s.Deref
+}
+
 // tryRef attempts to increment the snapshot's reference count. If the
 // snapshot is already disposed (refCount == 0), it returns false without
 // modifying the count. On success the caller must eventually call Deref.

@@ -254,6 +254,19 @@ func (c *AsyncConn) handleNotification(ctx context.Context, msg *Message) {
 
 // Call sends a request to the client and waits for a response.
 func (c *AsyncConn) Call(ctx context.Context, method string, params any) (json.Value, error) {
+	return c.call(ctx, method, params, false)
+}
+
+// CallWithWriteCancellation also bounds the write phase. If the peer stops reading, cancellation
+// closes the transport to unblock its writer. Cancellation while awaiting a reply does not close it.
+func (c *AsyncConn) CallWithWriteCancellation(ctx context.Context, method string, params any) (json.Value, error) {
+	return c.call(ctx, method, params, true)
+}
+
+func (c *AsyncConn) call(ctx context.Context, method string, params any, cancelWrite bool) (json.Value, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Create unique request ID
 	id := jsonrpc.NewIDString(fmt.Sprintf("api%d", c.seq.Add(1)))
 
@@ -277,10 +290,28 @@ func (c *AsyncConn) Call(ctx context.Context, method string, params any) (json.V
 		}
 	}()
 
-	// Send the request
+	// A context alone cannot interrupt a blocking pipe write. Only opted-in calls close the
+	// transport on a stalled write; once the write completes, normal response cancellation applies.
+	var stop func() bool
+	var interrupted chan struct{}
+	if cancelWrite {
+		interrupted = make(chan struct{})
+		stop = context.AfterFunc(ctx, func() { _ = c.rwc.Close(); close(interrupted) })
+	}
 	c.writeMu.Lock()
-	err := c.protocol.WriteRequest(id, method, params)
+	err := ctx.Err()
+	if err == nil {
+		err = c.protocol.WriteRequest(id, method, params)
+	}
+	// Disarm before another request can start writing. If cancellation won the race with write
+	// completion, join its closer so it cannot tear down a later request after this call returns.
+	if stop != nil && !stop() {
+		<-interrupted
+	}
 	c.writeMu.Unlock()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 
 	if err != nil {
 		return nil, err
