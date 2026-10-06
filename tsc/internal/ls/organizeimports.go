@@ -28,6 +28,13 @@ func (l *LanguageService) OrganizeImports(
 	program *compiler.Program,
 	kind lsproto.CodeActionKind,
 ) map[tspath.RootedFilePath][]*lsproto.TextEdit {
+	changeTracker := l.organizeImportsChanges(ctx, sourceFile, program, kind)
+	// The legacy entry point retains exact-only authored writeback.
+	changes, _ := changeTracker.GetChanges()
+	return changes
+}
+
+func (l *LanguageService) organizeImportsChanges(ctx context.Context, sourceFile *ast.SourceFile, program *compiler.Program, kind lsproto.CodeActionKind) *change.Tracker {
 	changeTracker := change.NewTracker(ctx, program.Options(), l.FormatOptions(), l.converters)
 	shouldSort := kind == lsproto.CodeActionKindSourceSortImportsTs || kind == lsproto.CodeActionKindSourceOrganizeImportsTs
 	shouldCombine := shouldSort
@@ -112,10 +119,7 @@ func (l *LanguageService) OrganizeImports(
 		}
 	}
 
-	// Unmappable files are dropped by GetChanges, so a content-mapped file whose imports cannot be
-	// faithfully rewritten yields no edits rather than a corrupting one.
-	changes, _ := changeTracker.GetChanges()
-	return changes
+	return changeTracker
 }
 
 type organizeImportsComparerSettings struct {

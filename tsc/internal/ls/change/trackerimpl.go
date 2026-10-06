@@ -132,31 +132,7 @@ func (t *Tracker) computeNewText(change *trackerEdit, targetSourceFile *ast.Sour
 		if !mapped.Fidelity.IsExact() {
 			continue
 		}
-		projection := mapped.Script
-		pos := int(mapped.Position)
-		formatNode := func(n *ast.Node) string {
-			return t.getFormattedTextOfNode(n, targetSourceFile, projection, pos, change.options)
-		}
-
-		var text string
-		switch change.kind {
-		case trackerEditKindReplaceWithMultipleNodes:
-			joiner := change.options.joiner
-			if joiner == "" {
-				joiner = t.newLine
-			}
-			text = strings.Join(core.Map(change.nodes, func(n *ast.Node) string { return strings.TrimSuffix(formatNode(n), t.newLine) }), joiner)
-		case trackerEditKindReplaceWithSingleNode:
-			text = formatNode(change.Node)
-		default:
-			panic(fmt.Sprintf("change kind %d should have been handled earlier", change.kind))
-		}
-		// Strip initial indentation if text will be inserted in the middle of the line.
-		noIndent := text
-		if !(change.options.indentation != nil || format.GetLineStartPositionForPosition(pos, projection) == pos) {
-			noIndent = strings.TrimLeftFunc(text, unicode.IsSpace)
-		}
-		candidate := change.options.Prefix + noIndent + core.IfElse(strings.HasSuffix(noIndent, change.options.Suffix), "", change.options.Suffix)
+		candidate := t.computeNewTextAt(change, targetSourceFile, mapped.Script, int(mapped.Position))
 		if found && candidate != result {
 			t.unmappableFiles.Add(sourceFile.OriginalFileName())
 			return ""
@@ -168,6 +144,37 @@ func (t *Tracker) computeNewText(change *trackerEdit, targetSourceFile *ast.Sour
 		t.unmappableFiles.Add(sourceFile.OriginalFileName())
 	}
 	return t.reindentInsertedLines(sourceFile, change, result)
+}
+
+// computeNewTextAt renders solely in the selected source's coordinates. Generated edit plans use it
+// before any authored conversion; the legacy path also uses it for each exact projection.
+func (t *Tracker) computeNewTextAt(change *trackerEdit, targetSourceFile, sourceFile *ast.SourceFile, pos int) string {
+	if change.kind == trackerEditKindRemove {
+		return ""
+	}
+	if change.kind == trackerEditKindText {
+		return change.NewText
+	}
+	formatNode := func(n *ast.Node) string {
+		return t.getFormattedTextOfNode(n, targetSourceFile, sourceFile, pos, change.options)
+	}
+	var text string
+	switch change.kind {
+	case trackerEditKindReplaceWithMultipleNodes:
+		joiner := change.options.joiner
+		if joiner == "" {
+			joiner = t.newLine
+		}
+		text = strings.Join(core.Map(change.nodes, func(n *ast.Node) string { return strings.TrimSuffix(formatNode(n), t.newLine) }), joiner)
+	case trackerEditKindReplaceWithSingleNode:
+		text = formatNode(change.Node)
+	default:
+		panic(fmt.Sprintf("change kind %d should have been handled earlier", change.kind))
+	}
+	if !(change.options.indentation != nil || format.GetLineStartPositionForPosition(pos, sourceFile) == pos) {
+		text = strings.TrimLeftFunc(text, unicode.IsSpace)
+	}
+	return change.options.Prefix + text + core.IfElse(strings.HasSuffix(text, change.options.Suffix), "", change.options.Suffix)
 }
 
 // reindentInsertedLines fixes the indentation of a line an insertion introduces into the document the

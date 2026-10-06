@@ -166,6 +166,15 @@ func (l *LanguageService) renameEditRange(entry *ReferenceEntry) (lsproto.Range,
 
 // getRenameInfoForNode performs detailed validation for a rename operation on a specific node.
 func (l *LanguageService) getRenameInfoForNode(ctx context.Context, newName string, node *ast.Node, sourceFile *ast.SourceFile, program *compiler.Program) (RenameInfo, bool) {
+	info, ok := l.getSemanticRenameInfo(ctx, newName, node, sourceFile, program)
+	if ok && info.CanRename && info.FileToRename == "" {
+		info = getRenameInfoSuccess(node, sourceFile, info.DisplayName, l.converters)
+	}
+	return info, ok
+}
+
+// getSemanticRenameInfo separates symbol eligibility from the legacy exact-only trigger mapping.
+func (l *LanguageService) getSemanticRenameInfo(ctx context.Context, newName string, node *ast.Node, sourceFile *ast.SourceFile, program *compiler.Program) (RenameInfo, bool) {
 	ch, done := program.GetTypeChecker(ctx)
 	defer done()
 
@@ -178,11 +187,11 @@ func (l *LanguageService) getRenameInfoForNode(ctx context.Context, newName stri
 				(typ.IsUnion() && core.Every(typ.Types(), func(t *checker.Type) bool {
 					return t.IsStringLiteral()
 				}))) {
-				return getRenameInfoSuccess(node, sourceFile, node.Text(), l.converters), true
+				return RenameInfo{CanRename: true, DisplayName: node.Text()}, true
 			}
 		} else if ast.IsLabelName(node) {
 			name := node.Text()
-			return getRenameInfoSuccess(node, sourceFile, name, l.converters), true
+			return RenameInfo{CanRename: true, DisplayName: name}, true
 		}
 		return RenameInfo{}, false
 	}
@@ -203,7 +212,7 @@ func (l *LanguageService) getRenameInfoForNode(ctx context.Context, newName stri
 		return RenameInfo{}, false
 	}
 
-	return getRenameInfoSuccess(node, sourceFile, ch.SymbolToString(symbol), l.converters), true
+	return RenameInfo{CanRename: true, DisplayName: ch.SymbolToString(symbol)}, true
 }
 
 func nodeIsEligibleForRename(node *ast.Node) bool {
