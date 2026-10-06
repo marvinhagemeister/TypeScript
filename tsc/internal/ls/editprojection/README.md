@@ -45,11 +45,25 @@ Preparation resolves an authored position to one semantic target. A whole-token 
 symbol from any character; unrelated overlapping projections are rejected. Execution repeats resolution
 and eligibility checks and does not depend on `prepareRename` having run.
 
-The prototype accepts canonical identifier input only. `next-item` is rejected, not guessed to mean
-`nextItem`. The provider renders `nextItem` as `next-item` at kebab sites and as `nextItem` at camel sites.
+By default, rename accepts canonical identifier input only. A mapper can separately opt into
+`renameInput` to supply an authored placeholder and normalize user input before semantic edit collection.
+For example, a Vue-like mapper can show `save-item`, accept `save-foo` (or optionally `@save-foo`), and
+return canonical `saveFoo`. This syntax policy belongs entirely to the mapper, not TypeScript.
+
+Only the initiating mapper receives raw input. It normalizes once per execution, even if that input is
+already a valid identifier or the editor skipped preparation. Execution resolves the current target and
+uses current authored content; a previous preparation result is never cached or trusted. The normalized
+result must be a non-keyword TypeScript identifier. A malformed, missing, stale, rejected or failed result
+aborts the operation; it never falls back to the original input. Normalization cannot retarget the symbol
+or change the trigger range, which remains governed by semantic resolution and mapping geometry.
+
+TypeScript and every destination provider receive the canonical name. Destination providers render that
+name according to each site's syntax; they do not normalize it again. Plain `.ts` origins still require
+canonical input on the projected path. Mappers without `renameInput` retain canonical placeholders and
+input, even if they return unnegotiated placeholder/normalization fields.
+
 TypeScript's complete per-occurrence replacement is retained, including shorthand and alias syntax;
-providers must not blindly case-convert an entire replacement expression. Authored-input normalization
-is a future optional capability at the initiating language boundary, before semantic computation.
+providers must not blindly case-convert an entire replacement expression.
 
 The generated planner retains all required occurrences, independent of presentation filtering. Existing
 TypeScript alias semantics still decide which references belong to the rename. A mapper is responsible
@@ -67,17 +81,22 @@ foreign syntax cannot be handled by merely remapping endpoints.
 The host advertises `editProjectionVersion: 1` in `openProject`. A mapper opts in per project by returning:
 
 ```json
-{"editProjection":{"version":1,"rename":true,"organizeImports":true}}
+{"editProjection":{"version":1,"rename":true,"renameInput":true,"organizeImports":true}}
 ```
 
-Omitting this object retains legacy behavior. Unsupported editing versions fail project opening rather
-than silently selecting an incompatible contract. The value-only wire types are in
+Omitting this object retains legacy behavior. `renameInput` is optional and requires `rename: true`.
+Unsupported editing versions or inconsistent input capabilities fail project opening rather than
+silently selecting an incompatible contract. The value-only wire types are in
 `contentmapper/edits.go`; no compiler AST or checker is passed to the process.
 
 - `prepareRename`: receives `projectHandle`, `snapshot`, `positionEncoding: "utf-8"`, authored `fileName`,
   `content`, byte `start`/`end`, and canonical `name`. Returns the same `snapshot`, `canRename`, and an
-  optional rejection `message`. This approves the initiating syntax; it does not replace TypeScript's
-  semantic eligibility or execution-time resolution. Plain-TypeScript origins need no mapper preparation.
+  optional rejection `message`. With `renameInput`, accepted responses must also provide a nonempty
+  `placeholder`. During execution only, the request additionally contains the untouched user `newName`,
+  and accepted responses must include a valid canonical `normalizedName`. Absence of `newName` denotes
+  preparation; an explicitly empty string still denotes execution and must reach the mapper unchanged.
+  This approves the initiating syntax; it does not replace TypeScript's semantic eligibility or
+  execution-time resolution. Plain-TypeScript origins need no mapper preparation.
 - `projectEdits`: receives `projectHandle`, `snapshot`, `positionEncoding: "utf-8"`, `operation`
   (`rename` or `organizeImports`), optional `newName`/`importAction`, and arrays of `documents`,
   `projections`, and `edits`. Documents contain IDs, authored paths/text and nullable open versions;
@@ -112,8 +131,8 @@ support; lacking it rejects the affected operation, not unrelated quick fixes.
 
 This remains experimental: all-tree loading can add latency to rename in mapper-enabled sessions, even
 when a particular target has no mapped references. Filtering only by the initiating extension would be
-incorrect. Targeted project discovery/benchmarking, public JavaScript APIs, authored-input normalization,
-resource operations, broad framework adoption and a manual editor UI smoke test remain future work.
+incorrect. Targeted project discovery/benchmarking, public JavaScript APIs, resource operations, broad
+framework adoption and a manual editor UI smoke test remain future work.
 Disabled solution searching/referenced-project loading retains the host's existing discovery limits.
 
 Versioned workspace edits protect open buffers; they do not promise rollback or atomic application in
@@ -133,6 +152,10 @@ changes to other closed semantic inputs rely on the host's existing file-watcher
    versions, cross-project solution references, legacy capability omission and import-action replacement.
 6. Hold a mapper response while processing a real `didChange` and semantic hover, or change a closed file
    without a watcher event, then require whole-operation rejection. Test configuration changes too.
+7. Exercise authored placeholders and input through the real mapper process, with/without preparation,
+   and normalize before cross-project collection. Verify arbitrary mapper policies, exactly-once origin
+   normalization, canonical-only compatibility, malformed responses, empty wire input, cancellation,
+   stale snapshots and timeouts before any destination projection occurs.
 
 `go -C tsc test ./internal/lsp -run '^TestLSPProjected'` runs the protocol integration tests. Successful
 rename/import tests apply authored edits and re-transform through the mapper subprocess before checking

@@ -169,36 +169,66 @@ func (s *Server) editFreshness(ctx context.Context, uri lsproto.DocumentUri, sna
 	}
 }
 
-func (s *Server) prepareMapperRename(ctx context.Context, snapshot *project.Snapshot, service *ls.LanguageService, uri lsproto.DocumentUri, position lsproto.Position, route *mapperEditRoute) (ls.RenameInfo, error) {
+func validProjectedRenameName(name string) bool {
+	return scanner.IsValidIdentifier(name) && scanner.GetIdentifierToken(name) == ast.KindIdentifier
+}
+
+// newName is nil for preparation and the untouched user input for execution. Only the initiating
+// mapper normalizes it; destination providers and TypeScript receive the canonical name.
+func (s *Server) prepareMapperRename(ctx context.Context, snapshot *project.Snapshot, service *ls.LanguageService, uri lsproto.DocumentUri, position lsproto.Position, route *mapperEditRoute, newName *string) (ls.RenameInfo, string, error) {
 	info, err := service.PrepareProjectedRename(ctx, uri, position)
 	if err != nil {
-		return ls.RenameInfo{}, err
+		return ls.RenameInfo{}, "", err
 	}
 	file := service.GetProgram().GetSourceFile(uri.FileName())
 	spans := snapshot.Converters().FromLSPRange(originalEditScript{file}, info.TriggerSpan, spanmap.FeatureAll)
 	if len(spans) != 1 {
-		return ls.RenameInfo{}, errors.New("rename trigger has no authored range")
+		return ls.RenameInfo{}, "", errors.New("rename trigger has no authored range")
 	}
 	if identityErr := route.checkIdentity(); identityErr != nil {
-		return ls.RenameInfo{}, identityErr
+		return ls.RenameInfo{}, "", identityErr
 	}
-	result, err := route.editor.PrepareRename(ctx, route.mapper, contentmapper.PrepareRenameParams{
+	renameInput := route.editor.EditCapabilities(route.mapper).RenameInput
+	params := contentmapper.PrepareRenameParams{
 		Snapshot: strconv.FormatUint(snapshot.ID(), 10), FileName: file.OriginalFileName().AsString(), Content: file.OriginalText(),
 		Start: spans[0].Span.Pos(), End: spans[0].Span.End(), Name: info.DisplayName,
-	})
-	if err != nil {
-		return ls.RenameInfo{}, err
 	}
-	if !result.CanRename {
-		return ls.RenameInfo{}, fmt.Errorf("content mapper cannot rename this element: %s", result.Message)
+	if renameInput {
+		params.NewName = newName
+	}
+	result, err := route.editor.PrepareRename(ctx, route.mapper, params)
+	if err != nil {
+		return ls.RenameInfo{}, "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return ls.RenameInfo{}, "", err
 	}
 	if err := route.checkIdentity(); err != nil {
-		return ls.RenameInfo{}, err
+		return ls.RenameInfo{}, "", err
 	}
-	if s.editFreshness(ctx, uri, snapshot, []*ast.SourceFile{file})() != strconv.FormatUint(snapshot.ID(), 10) {
-		return ls.RenameInfo{}, lsproto.ErrorCodeContentModified
+	if s.editFreshness(ctx, uri, snapshot, []*ast.SourceFile{file})() != params.Snapshot {
+		return ls.RenameInfo{}, "", lsproto.ErrorCodeContentModified
 	}
-	return info, nil
+	if !result.CanRename {
+		return ls.RenameInfo{}, "", fmt.Errorf("content mapper cannot rename this element: %s", result.Message)
+	}
+	canonicalName := ""
+	if newName != nil {
+		canonicalName = *newName
+	}
+	if renameInput {
+		if result.Placeholder == nil || *result.Placeholder == "" {
+			return ls.RenameInfo{}, "", errors.New("content mapper returned a missing or empty authored rename placeholder")
+		}
+		info.DisplayName = *result.Placeholder
+		if newName != nil {
+			if result.NormalizedName == nil || !validProjectedRenameName(*result.NormalizedName) {
+				return ls.RenameInfo{}, "", errors.New("content mapper returned an invalid or missing normalized rename name")
+			}
+			canonicalName = *result.NormalizedName
+		}
+	}
+	return info, canonicalName, nil
 }
 
 func (s *Server) tryPrepareMapperRename(ctx context.Context, service *ls.LanguageService, params *lsproto.PrepareRenameParams) (info ls.RenameInfo, handled bool, err error) {
@@ -213,7 +243,7 @@ func (s *Server) tryPrepareMapperRename(ctx context.Context, service *ls.Languag
 			err = lsproto.ErrorCodeContentModified
 			return
 		}
-		info, err = s.prepareMapperRename(ctx, snapshot, service, params.TextDocument.Uri, params.Position, route)
+		info, _, err = s.prepareMapperRename(ctx, snapshot, service, params.TextDocument.Uri, params.Position, route, nil)
 	})
 	return
 }
@@ -321,14 +351,16 @@ func (s *Server) mapperRenameWork(ctx context.Context, params *lsproto.RenamePar
 		release := snapshot.Retain()
 		work = func() (response lsproto.RenameResponse, err error) {
 			defer release()
+			// Keep the original LSP request immutable, including for any other consumers of it.
+			semanticParams := *params
 			origin := primary.GetProgram().GetSourceFile(params.TextDocument.Uri.FileName())
 			if route := routes[origin]; route != nil {
-				if _, err = s.prepareMapperRename(ctx, snapshot, service, params.TextDocument.Uri, params.Position, route); err != nil {
+				if _, semanticParams.NewName, err = s.prepareMapperRename(ctx, snapshot, service, params.TextDocument.Uri, params.Position, route, &params.NewName); err != nil {
 					return response, err
 				}
 			}
 			orchestrator := &frozenEditProjects{snapshot, primary, params.TextDocument.Uri}
-			edits, err := service.GetRenameEdits(ctx, params, orchestrator)
+			edits, err := service.GetRenameEdits(ctx, &semanticParams, orchestrator)
 			if err != nil {
 				return response, err
 			}
@@ -343,15 +375,15 @@ func (s *Server) mapperRenameWork(ctx context.Context, params *lsproto.RenamePar
 				}
 			}
 			if len(providers) == 0 {
-				return service.ProvideRename(ctx, params, orchestrator)
+				return service.ProvideRename(ctx, &semanticParams, orchestrator)
 			}
 			if !s.clientCapabilities.Workspace.WorkspaceEdit.DocumentChanges {
 				return response, errors.New("projected rename requires versioned documentChanges support")
 			}
-			if !scanner.IsValidIdentifier(params.NewName) || scanner.GetIdentifierToken(params.NewName) != ast.KindIdentifier {
+			if !validProjectedRenameName(semanticParams.NewName) {
 				return response, errors.New("edit projection: expected a canonical identifier")
 			}
-			plan, err := editprojection.NewPlan(editSnapshot(snapshot, programs), editprojection.Operation{Kind: editprojection.Rename, NewName: params.NewName}, edits)
+			plan, err := editprojection.NewPlan(editSnapshot(snapshot, programs), editprojection.Operation{Kind: editprojection.Rename, NewName: semanticParams.NewName}, edits)
 			if err != nil {
 				return response, err
 			}

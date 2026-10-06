@@ -98,9 +98,10 @@ func spawnEditMapper(_ []string, _ string, stderr io.Writer) (io.ReadWriteCloser
 }
 
 type rpcEditMapper struct {
-	mode      string
-	onProject func(contentmapper.ProjectEditsParams)
-	onPrepare func(contentmapper.PrepareRenameParams)
+	mode          string
+	onProject     func(contentmapper.ProjectEditsParams)
+	onPrepare     func(contentmapper.PrepareRenameParams)
+	prepareResult func(contentmapper.PrepareRenameParams) (contentmapper.PrepareRenameResult, error)
 }
 
 func (*rpcEditMapper) HandleNotification(context.Context, string, json.Value) error { return nil }
@@ -118,7 +119,7 @@ func (h *rpcEditMapper) HandleRequest(ctx context.Context, method string, raw js
 		}
 		result := contentmapper.OpenProjectResult{}
 		if h.mode != "legacy" {
-			result.EditProjection = &contentmapper.EditProjectionCapabilities{Version: contentmapper.EditProjectionVersion, Rename: true, OrganizeImports: true}
+			result.EditProjection = &contentmapper.EditProjectionCapabilities{Version: contentmapper.EditProjectionVersion, Rename: true, OrganizeImports: true, RenameInput: h.mode != "canonical-input"}
 		}
 		return result, nil
 	case contentmapper.MethodCloseProject:
@@ -134,7 +135,36 @@ func (h *rpcEditMapper) HandleRequest(ctx context.Context, method string, raw js
 		if h.onPrepare != nil {
 			h.onPrepare(params)
 		}
-		return contentmapper.PrepareRenameResult{Snapshot: params.Snapshot, CanRename: h.mode != "reject-prepare", Message: "fixture rejection"}, nil
+		if h.mode == "prepare-hang" {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		if h.prepareResult != nil {
+			return h.prepareResult(params)
+		}
+		result := contentmapper.PrepareRenameResult{Snapshot: params.Snapshot, CanRename: h.mode != "reject-prepare", Message: "fixture rejection"}
+		if h.mode != "canonical-input" {
+			result.Placeholder = new(params.Content[params.Start:params.End])
+			if params.NewName != nil {
+				// This fixture accepts an optional Vue-style sigil; production has no such policy.
+				name := strings.TrimPrefix(*params.NewName, "@")
+				var canonical strings.Builder
+				for i, part := range strings.Split(name, "-") {
+					if part == "" {
+						result.CanRename = false
+						break
+					}
+					if i > 0 {
+						runes := []rune(part)
+						runes[0] = unicode.ToUpper(runes[0])
+						part = string(runes)
+					}
+					canonical.WriteString(part)
+				}
+				result.NormalizedName = new(canonical.String())
+			}
+		}
+		return result, nil
 	case contentmapper.MethodTransform:
 		var params contentmapper.TransformParams
 		if err := json.Unmarshal(raw, &params); err != nil {
@@ -419,7 +449,7 @@ func TestLSPProjectedRenameProcess(t *testing.T) {
 				msg, prepared, ok := client.SendRequest(t, lsproto.TextDocumentPrepareRenameInfo, &lsproto.PrepareRenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: editTestURI(name)}, Position: position})
 				assert.Assert(t, ok && msg.AsResponse().Error == nil, "prepare: %v", msg.AsResponse().Error)
 				assert.Assert(t, prepared.PrepareRenamePlaceholder != nil)
-				assert.Equal(t, prepared.PrepareRenamePlaceholder.Placeholder, "saveItem")
+				assert.Equal(t, prepared.PrepareRenamePlaceholder.Placeholder, spelling)
 				msg, renamed, ok := client.SendRequest(t, lsproto.TextDocumentRenameInfo, &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: editTestURI(name)}, Position: position, NewName: "nextItem"})
 				assert.Assert(t, ok && msg.AsResponse().Error == nil, "rename: %v", msg.AsResponse().Error)
 				updated := applyLSPEdit(t, files, renamed.WorkspaceEdit, encoding)

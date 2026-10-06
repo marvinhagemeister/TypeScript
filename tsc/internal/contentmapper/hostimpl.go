@@ -691,7 +691,7 @@ func (h *host) openProjectLocked(ctx context.Context, entry *projectEntry) error
 	}
 	entry.editProjection = EditProjectionCapabilities{}
 	if result.EditProjection != nil {
-		if result.EditProjection.Version != EditProjectionVersion {
+		if result.EditProjection.Version != EditProjectionVersion || result.EditProjection.RenameInput && !result.EditProjection.Rename {
 			return &ProjectError{Kind: ProjectErrorKindMalformedResponse}
 		}
 		entry.editProjection = *result.EditProjection

@@ -22,6 +22,8 @@ type EditProjectionCapabilities struct {
 	Version         int  `json:"version"`
 	Rename          bool `json:"rename,omitempty"`
 	OrganizeImports bool `json:"organizeImports,omitempty"`
+	// RenameInput opts into authored placeholders and execution-time input normalization. Requires Rename.
+	RenameInput bool `json:"renameInput,omitzero"`
 }
 
 // EditingProject is optional so compiler-only hosts need not implement editing RPCs.
@@ -40,12 +42,17 @@ type PrepareRenameParams struct {
 	Start            int              `json:"start"`
 	End              int              `json:"end"`
 	Name             string           `json:"name"`
+	// NewName is the raw authored input, present only during execution with RenameInput enabled.
+	NewName *string `json:"newName,omitzero"`
 }
 
 type PrepareRenameResult struct {
 	Snapshot  string `json:"snapshot"`
 	CanRename bool   `json:"canRename"`
 	Message   string `json:"message,omitempty"`
+	// Accepted RenameInput requests require Placeholder; execution also requires NormalizedName.
+	Placeholder    *string `json:"placeholder,omitzero"`
+	NormalizedName *string `json:"normalizedName,omitzero"`
 }
 
 type EditDocument struct {

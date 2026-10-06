@@ -58,8 +58,7 @@ func TestLSPProjectedRenameLegacyCompatibility(t *testing.T) {
 	assert.Equal(t, calls.Load(), int32(0))
 }
 
-func TestLSPProjectedRenameCollectsProjects(t *testing.T) {
-	t.Parallel()
+func editSolutionFiles() map[string]string {
 	files := editTestFiles()
 	config := strings.Replace(files["/home/project/tsconfig.json"], `"strict":true`, `"strict":true,"composite":true,"rootDir":".."`, 1)
 	files["/home/project/tsconfig.json"] = `{"files":[],"references":[{"path":"./first"},{"path":"./second"}]}`
@@ -69,6 +68,12 @@ func TestLSPProjectedRenameCollectsProjects(t *testing.T) {
 		files["/home/project/"+dir+"/app.view"] = projectionComponent
 		files["/home/project/"+dir+"/child.ts"] = "export { child } from '../child';"
 	}
+	return files
+}
+
+func TestLSPProjectedRenameCollectsProjects(t *testing.T) {
+	t.Parallel()
+	files := editSolutionFiles()
 	client := newEditLSPClient(t, files, nil, lsproto.PositionEncodingKindUTF16)
 	// Opening only one consumer must not hide the other project's mapped reference.
 	openEditDocument(t, client, "/home/project/first/app.view", projectionComponent, 1)
