@@ -13,7 +13,6 @@ import (
 	"github.com/microsoft/TypeScript/tsc/internal/ls/editprojection"
 	"github.com/microsoft/TypeScript/tsc/internal/ls/lsutil"
 	"github.com/microsoft/TypeScript/tsc/internal/lsp/lsproto"
-	"github.com/microsoft/TypeScript/tsc/internal/scanner"
 	"github.com/microsoft/TypeScript/tsc/internal/spanmap"
 	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 )
@@ -86,18 +85,6 @@ func (l *LanguageService) resolveProjectedRename(ctx context.Context, uri lsprot
 		return nil, nil, RenameInfo{}, errors.New("edit projection: no rename target")
 	}
 	return selectedFile, selectedNode, selectedInfo, nil
-}
-
-// GetRenameEditPlan is the single-program convenience entry point for internal callers.
-func (l *LanguageService) GetRenameEditPlan(ctx context.Context, params *lsproto.RenameParams, snapshot editprojection.Snapshot) (*editprojection.Plan, error) {
-	if !scanner.IsValidIdentifier(params.NewName) || scanner.GetIdentifierToken(params.NewName) != ast.KindIdentifier {
-		return nil, errors.New("edit projection: expected a canonical identifier")
-	}
-	edits, err := l.GetRenameEdits(ctx, params, nil)
-	if err != nil {
-		return nil, err
-	}
-	return editprojection.NewPlan(snapshot, editprojection.Operation{Kind: editprojection.Rename, NewName: params.NewName}, edits)
 }
 
 // GetRenameEdits materializes generated edits across the orchestrator's programs before any projection.

@@ -170,12 +170,16 @@ func (h *rpcEditMapper) HandleRequest(ctx context.Context, method string, raw js
 		if err := json.Unmarshal(raw, &params); err != nil {
 			return nil, err
 		}
-		text, segments := transformEditFixture(params.Content)
-		mapping, err := spanmap.New(segments).Marshal()
+		transform := contentmappertest.ListenerTransform(true, false)
+		if strings.Contains(params.Content, "@body ") {
+			transform = contentmappertest.ImportTransform
+		}
+		result := transform(params.Content)
+		mapping, err := result.Mappings.Marshal()
 		if err != nil {
 			return nil, err
 		}
-		return contentmapper.TransformResult{Text: text, Extension: ".ts", Mappings: json.Value(mapping)}, nil
+		return contentmapper.TransformResult{Text: result.Text, Extension: result.VirtualExtension, Mappings: json.Value(mapping)}, nil
 	case contentmapper.MethodProjectEdits:
 		var params contentmapper.ProjectEditsParams
 		if err := json.Unmarshal(raw, &params); err != nil {
@@ -213,49 +217,6 @@ func (h *rpcEditMapper) HandleRequest(ctx context.Context, method string, raw js
 		return result, err
 	}
 	return nil, fmt.Errorf("unexpected mapper method %s", method)
-}
-
-func transformEditFixture(original string) (string, []spanmap.Segment) {
-	if strings.Contains(original, "@body ") {
-		start := strings.Index(original, "import {")
-		end := start + strings.Index(original[start:], ";") + 1
-		importText := strings.Join(strings.Fields(original[start:end]), " ")
-		prefix := "import { helper } from \"./runtime\";\n\n" + original[:start]
-		text := prefix + importText + "\n\n"
-		body := strings.Index(original, "@body ") + len("@body ")
-		return text + original[body:], []spanmap.Segment{
-			{VirtualStart: core.TextPos(len(prefix)), VirtualEnd: core.TextPos(len(prefix) + len(importText)), OriginalStart: core.TextPos(start), OriginalEnd: core.TextPos(end), Kind: spanmap.KindAtom, Features: spanmap.FeatureAll},
-			{VirtualStart: core.TextPos(len(text)), VirtualEnd: core.TextPos(len(text) + len(original) - body), OriginalStart: core.TextPos(body), OriginalEnd: core.TextPos(len(original)), Kind: spanmap.KindVerbatim, Features: spanmap.FeatureAll},
-		}
-	}
-	var text strings.Builder
-	text.WriteString("import { child } from './child';\n")
-	var segments []spanmap.Segment
-	for offset := 0; offset < len(original); {
-		at := strings.IndexByte(original[offset:], '@')
-		if at < 0 {
-			break
-		}
-		start := offset + at + 1
-		end := start + strings.IndexByte(original[start:], '=')
-		parts := strings.Split(original[start:end], "-")
-		var name strings.Builder
-		name.WriteString(parts[0])
-		for _, part := range parts[1:] {
-			name.WriteString(strings.ToUpper(part[:1]))
-			name.WriteString(part[1:])
-		}
-		// Duplicate projections test deduplication without weakening Atom location fidelity.
-		for range 2 {
-			text.WriteString("child.")
-			pos := text.Len()
-			text.WriteString(name.String())
-			segments = append(segments, spanmap.Segment{VirtualStart: core.TextPos(pos), VirtualEnd: core.TextPos(text.Len()), OriginalStart: core.TextPos(start), OriginalEnd: core.TextPos(end), Kind: spanmap.KindAtom, Features: spanmap.FeatureAll})
-			text.WriteString(";\n")
-		}
-		offset = end + 1
-	}
-	return text.String(), segments
 }
 
 func projectEditFixture(params contentmapper.ProjectEditsParams) (contentmapper.ProjectEditsResult, error) {
@@ -305,18 +266,7 @@ func projectEditFixture(params contentmapper.ProjectEditsParams) (contentmapper.
 		if !fidelity.IsSingleSegment() || edit.NewText != params.NewName {
 			return result, errors.New("unsupported listener edit")
 		}
-		name := params.NewName
-		if strings.Contains(doc.Text[rng.Pos():rng.End()], "-") {
-			var kebab strings.Builder
-			for _, ch := range name {
-				if unicode.IsUpper(ch) {
-					kebab.WriteByte('-')
-					ch = unicode.ToLower(ch)
-				}
-				kebab.WriteRune(ch)
-			}
-			name = kebab.String()
-		}
+		name := contentmappertest.RenameListener(doc.Text[rng.Pos():rng.End()], params.NewName)
 		result.Results = append(result.Results, contentmapper.EditCoverage{Inputs: []int{edit.ID}, Edits: []contentmapper.AuthoredEdit{{Document: doc.ID, Start: rng.Pos(), End: rng.End(), NewText: name}}})
 	}
 	return result, nil

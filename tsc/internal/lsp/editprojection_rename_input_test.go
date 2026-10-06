@@ -125,7 +125,7 @@ func TestLSPProjectedRenameCanonicalInputCompatibility(t *testing.T) {
 	assert.Equal(t, updated["/home/project/child.ts"], "export const child = { nextItem: 1 };\n")
 	params.NewName = "next-item"
 	msg, response, _ = client.SendRequest(t, lsproto.TextDocumentRenameInfo, params)
-	assert.Assert(t, msg.AsResponse().Error != nil)
+	assert.ErrorContains(t, msg.AsResponse().Error, "expected a canonical identifier")
 	assert.Assert(t, response.WorkspaceEdit == nil)
 }
 

@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"unicode"
 
 	"github.com/microsoft/TypeScript/tsc/internal/ast"
 	"github.com/microsoft/TypeScript/tsc/internal/bundled"
@@ -21,12 +20,22 @@ import (
 	"github.com/microsoft/TypeScript/tsc/internal/lsp/lsproto"
 	"github.com/microsoft/TypeScript/tsc/internal/parser"
 	"github.com/microsoft/TypeScript/tsc/internal/spanmap"
+	"github.com/microsoft/TypeScript/tsc/internal/testutil/contentmappertest"
 	"github.com/microsoft/TypeScript/tsc/internal/tsoptions"
 	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 	"github.com/microsoft/TypeScript/tsc/internal/vfs"
 	"github.com/microsoft/TypeScript/tsc/internal/vfs/vfstest"
 	"gotest.tools/v3/assert"
 )
+
+// Build single-program plans in tests using the same generated-edits entry point as LSP.
+func (l *LanguageService) getRenameEditPlan(ctx context.Context, params *lsproto.RenameParams, snapshot editprojection.Snapshot) (*editprojection.Plan, error) {
+	edits, err := l.GetRenameEdits(ctx, params, nil)
+	if err != nil {
+		return nil, err
+	}
+	return editprojection.NewPlan(snapshot, editprojection.Operation{Kind: editprojection.Rename, NewName: params.NewName}, edits)
+}
 
 func TestProjectedRenameMixedSpellings(t *testing.T) {
 	t.Parallel()
@@ -39,7 +48,7 @@ func TestProjectedRenameMixedSpellings(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/duplicate=%t", origin, duplicate), func(t *testing.T) {
 				t.Parallel()
 				files := map[string]string{"/child.ts": "export const child = { saveItem: 1 };\n", "/app.view": authored}
-				transform := listenerTransform(duplicate, false)
+				transform := contentmappertest.ListenerTransform(duplicate, false)
 				service := newProjectionTestService(t, files, transform)
 				name, offset := "/child.ts", strings.Index(files["/child.ts"], "saveItem")
 				if origin != "declaration" {
@@ -60,7 +69,7 @@ func TestProjectedRenameMixedSpellings(t *testing.T) {
 					assert.Assert(t, !service.GetRenameInfo(t.Context(), "nextItem", uri(name), originalPosition(service, name, files[name], offset)).CanRename)
 				}
 				params := &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: uri(name)}, Position: originalPosition(service, name, files[name], offset), NewName: "nextItem"}
-				plan, err := service.GetRenameEditPlan(t.Context(), params, editprojection.Snapshot{ID: "1"})
+				plan, err := service.getRenameEditPlan(t.Context(), params, editprojection.Snapshot{ID: "1"})
 				assert.NilError(t, err)
 				calls := 0
 				provider := func(ctx context.Context, request editprojection.Request) (editprojection.Response, error) {
@@ -86,32 +95,28 @@ func TestProjectedRenameMixedSpellings(t *testing.T) {
 	}
 }
 
-func TestProjectedRenameRejectsAmbiguityAndAuthoredInput(t *testing.T) {
+func TestProjectedRenameRejectsAmbiguity(t *testing.T) {
 	t.Parallel()
 	files := map[string]string{"/child.ts": "export const child = { saveItem: 1 }; export const other = { saveItem: 2 };", "/app.view": "<Child @save-item=\"handler\" />"}
-	service := newProjectionTestService(t, files, listenerTransform(true, true))
+	service := newProjectionTestService(t, files, contentmappertest.ListenerTransform(true, true))
 	pos := originalPosition(service, "/app.view", files["/app.view"], strings.Index(files["/app.view"], "save-item")+3)
 	_, err := service.PrepareProjectedRename(t.Context(), uri("/app.view"), pos)
 	assert.ErrorContains(t, err, "ambiguous")
-	plan, err := service.GetRenameEditPlan(t.Context(), &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: uri("/app.view")}, Position: pos, NewName: "nextItem"}, editprojection.Snapshot{ID: "1"})
+	plan, err := service.getRenameEditPlan(t.Context(), &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: uri("/app.view")}, Position: pos, NewName: "nextItem"}, editprojection.Snapshot{ID: "1"})
 	assert.Assert(t, plan == nil)
 	assert.ErrorContains(t, err, "ambiguous")
 	declaration := originalPosition(service, "/child.ts", files["/child.ts"], strings.Index(files["/child.ts"], "saveItem"))
-	plan, err = service.GetRenameEditPlan(t.Context(), &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: uri("/child.ts")}, Position: declaration, NewName: "nextItem"}, editprojection.Snapshot{ID: "1"})
+	plan, err = service.getRenameEditPlan(t.Context(), &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: uri("/child.ts")}, Position: declaration, NewName: "nextItem"}, editprojection.Snapshot{ID: "1"})
 	assert.Assert(t, plan == nil)
 	assert.ErrorContains(t, err, "uncovered rename projection")
-	service = newProjectionTestService(t, files, listenerTransform(false, false))
-	plan, err = service.GetRenameEditPlan(t.Context(), &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: uri("/app.view")}, Position: pos, NewName: "next-item"}, editprojection.Snapshot{ID: "1"})
-	assert.Assert(t, plan == nil)
-	assert.ErrorContains(t, err, "canonical identifier")
 }
 
 func TestProjectedRenameMissingProviderReturnsNoPartialEdit(t *testing.T) {
 	t.Parallel()
 	files := map[string]string{"/child.ts": "export const child = { saveItem: 1 };", "/app.view": "<Child @save-item=\"handler\" />"}
-	service := newProjectionTestService(t, files, listenerTransform(false, false))
+	service := newProjectionTestService(t, files, contentmappertest.ListenerTransform(false, false))
 	pos := originalPosition(service, "/child.ts", files["/child.ts"], strings.Index(files["/child.ts"], "saveItem"))
-	plan, err := service.GetRenameEditPlan(t.Context(), &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: uri("/child.ts")}, Position: pos, NewName: "nextItem"}, editprojection.Snapshot{ID: "1"})
+	plan, err := service.getRenameEditPlan(t.Context(), &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: uri("/child.ts")}, Position: pos, NewName: "nextItem"}, editprojection.Snapshot{ID: "1"})
 	assert.NilError(t, err)
 	workspace, err := plan.Project(t.Context(), nil, func() string { return "1" }, lsproto.PositionEncodingKindUTF8)
 	assert.Assert(t, workspace == nil)
@@ -123,7 +128,7 @@ func TestProjectedRenamePreservesNativeAliasEdits(t *testing.T) {
 	files := map[string]string{"/plain.ts": "const old = 1;\nconst object = { old };\nexport { old };\n"}
 	service := newProjectionTestService(t, files, nil)
 	params := &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: uri("/plain.ts")}, Position: originalPosition(service, "/plain.ts", files["/plain.ts"], 6), NewName: "next"}
-	plan, err := service.GetRenameEditPlan(t.Context(), params, editprojection.Snapshot{ID: "1"})
+	plan, err := service.getRenameEditPlan(t.Context(), params, editprojection.Snapshot{ID: "1"})
 	assert.NilError(t, err)
 	projected, err := plan.Project(t.Context(), nil, func() string { return "1" }, lsproto.PositionEncodingKindUTF8)
 	assert.NilError(t, err)
@@ -140,7 +145,7 @@ func TestProjectedRenameDoesNotIgnoreHiddenPartialProjections(t *testing.T) {
 	t.Parallel()
 	files := map[string]string{"/child.ts": "export const child = { saveItem: 1 }; export const other = { saveItem: 2 };", "/app.view": "<Child @save-item=\"handler\" />"}
 	transform := func(text string) contentmapper.Result {
-		result := listenerTransform(true, true)(text)
+		result := contentmappertest.ListenerTransform(true, true)(text)
 		segments := slices.Clone(result.Mappings.Segments())
 		segments[1].Features = spanmap.FeatureNone
 		segments[1].OriginalEnd = segments[1].OriginalStart + 4
@@ -149,7 +154,7 @@ func TestProjectedRenameDoesNotIgnoreHiddenPartialProjections(t *testing.T) {
 	}
 	service := newProjectionTestService(t, files, transform)
 	params := &lsproto.RenameParams{TextDocument: lsproto.TextDocumentIdentifier{Uri: uri("/child.ts")}, Position: originalPosition(service, "/child.ts", files["/child.ts"], strings.Index(files["/child.ts"], "saveItem")), NewName: "nextItem"}
-	plan, err := service.GetRenameEditPlan(t.Context(), params, editprojection.Snapshot{ID: "1"})
+	plan, err := service.getRenameEditPlan(t.Context(), params, editprojection.Snapshot{ID: "1"})
 	assert.Assert(t, plan == nil)
 	assert.ErrorContains(t, err, "uncovered rename projection")
 }
@@ -162,7 +167,7 @@ func TestProjectedOrganizeImports(t *testing.T) {
 	// authored import and retains its comment and multiline layout.
 	const original = "// keep this comment\nimport {\n    z,\n    a,\n    unused,\n} from \"./dep\";\n\n@body { a; z; }\n"
 	files := map[string]string{"/app.view": original, "/dep.ts": "export const a = 1, z = 2, unused = 3;", "/runtime.ts": "export const helper = 1;"}
-	service := newProjectionTestService(t, files, importTransform)
+	service := newProjectionTestService(t, files, contentmappertest.ImportTransform)
 	file := service.program.GetSourceFile("/app.view")
 	legacy := service.OrganizeImports(t.Context(), file, service.program, lsproto.CodeActionKindSourceOrganizeImportsTs)
 	assert.Equal(t, len(legacy), 0)
@@ -205,54 +210,11 @@ func TestProjectedOrganizeImports(t *testing.T) {
 	assert.Equal(t, calls, 1)
 	updated := applyProjectionWorkspace(t, files, workspace)
 	assert.Equal(t, updated["/app.view"], "// keep this comment\nimport {\n    a,\n    z,\n} from \"./dep\";\n\n@body { a; z; }\n")
-	regenerated := newProjectionTestService(t, updated, importTransform)
+	regenerated := newProjectionTestService(t, updated, contentmappertest.ImportTransform)
 	assertNoProjectionErrors(t, regenerated)
 	// Regeneration legitimately restores the synthesized helper. Equality to patched virtual text
 	// would therefore be the wrong correctness criterion.
 	assert.Assert(t, strings.Contains(regenerated.program.GetSourceFile("/app.view").Text(), "helper"))
-}
-
-func listenerTransform(duplicate, ambiguous bool) func(string) contentmapper.Result {
-	return func(original string) contentmapper.Result {
-		var text strings.Builder
-		text.WriteString("import { child, other } from \"./child\";\n")
-		if !ambiguous {
-			text.Reset()
-			text.WriteString("import { child } from \"./child\";\n")
-		}
-		var segments []spanmap.Segment
-		for offset := 0; offset < len(original); {
-			rel := strings.IndexByte(original[offset:], '@')
-			if rel < 0 {
-				break
-			}
-			start := offset + rel + 1
-			end := start + strings.IndexByte(original[start:], '=')
-			name := original[start:end]
-			parts := strings.Split(name, "-")
-			for i := 1; i < len(parts); i++ {
-				parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
-			}
-			canonical := strings.Join(parts, "")
-			count := 1
-			if duplicate {
-				count = 2
-			}
-			for i := range count {
-				if ambiguous && i == 1 {
-					text.WriteString("other.")
-				} else {
-					text.WriteString("child.")
-				}
-				virtualStart := text.Len()
-				text.WriteString(canonical)
-				segments = append(segments, spanmap.Segment{VirtualStart: core.TextPos(virtualStart), VirtualEnd: core.TextPos(text.Len()), OriginalStart: core.TextPos(start), OriginalEnd: core.TextPos(end), Kind: spanmap.KindAtom, Features: spanmap.FeatureAll})
-				text.WriteString(";\n")
-			}
-			offset = end + 1
-		}
-		return contentmapper.Result{Text: text.String(), VirtualExtension: ".ts", Mappings: spanmap.New(segments)}
-	}
 }
 
 func projectListeners(ctx context.Context, req editprojection.Request) (editprojection.Response, error) {
@@ -277,34 +239,10 @@ func projectListeners(ctx context.Context, req editprojection.Request) (editproj
 		if !fidelity.IsSingleSegment() || edit.Change.NewText != req.Operation.NewName {
 			return editprojection.Response{}, errors.New("unsupported listener edit")
 		}
-		name := edit.Change.NewText
-		if strings.Contains(document.Text[rng.Pos():rng.End()], "-") {
-			var kebab strings.Builder
-			for _, ch := range name {
-				if unicode.IsUpper(ch) {
-					kebab.WriteByte('-')
-					ch = unicode.ToLower(ch)
-				}
-				kebab.WriteRune(ch)
-			}
-			name = kebab.String()
-		}
+		name := contentmappertest.RenameListener(document.Text[rng.Pos():rng.End()], edit.Change.NewText)
 		response.Results = append(response.Results, editprojection.Result{Inputs: []int{edit.ID}, Edits: []editprojection.AuthoredEdit{{Document: document.ID, Change: core.TextChange{TextRange: rng, NewText: name}}}})
 	}
 	return response, ctx.Err()
-}
-
-func importTransform(original string) contentmapper.Result {
-	start := strings.Index(original, "import {")
-	end := start + strings.Index(original[start:], ";") + 1
-	importText := strings.Join(strings.Fields(original[start:end]), " ")
-	prefix := "import { helper } from \"./runtime\";\n\n"
-	text := prefix + original[:start] + importText + "\n\n"
-	virtualStart := len(prefix) + start
-	segments := []spanmap.Segment{{VirtualStart: core.TextPos(virtualStart), VirtualEnd: core.TextPos(virtualStart + len(importText)), OriginalStart: core.TextPos(start), OriginalEnd: core.TextPos(end), Kind: spanmap.KindAtom, Features: spanmap.FeatureAll}}
-	bodyStart := strings.Index(original, "@body ") + len("@body ")
-	segments = append(segments, spanmap.Segment{VirtualStart: core.TextPos(len(text)), VirtualEnd: core.TextPos(len(text) + len(original) - bodyStart), OriginalStart: core.TextPos(bodyStart), OriginalEnd: core.TextPos(len(original)), Kind: spanmap.KindVerbatim, Features: spanmap.FeatureAll})
-	return contentmapper.Result{Text: text + original[bodyStart:], VirtualExtension: ".ts", Mappings: spanmap.New(segments)}
 }
 
 type projectionTestMapper struct {
