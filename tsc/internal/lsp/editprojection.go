@@ -60,6 +60,10 @@ func editRoute(program *compiler.Program, file *ast.SourceFile, kind editproject
 	return nil
 }
 
+func (r *mapperEditRoute) owner(projectContext string) string {
+	return fmt.Sprintf("%q:%q:%q", projectContext, r.mapper.Identity(), r.identity)
+}
+
 func (r *mapperEditRoute) checkIdentity() error {
 	identity, err := r.project.Identity(r.mapper)
 	if err != nil {
@@ -92,6 +96,9 @@ func (r *mapperEditRoute) provider(ctx context.Context, request editprojection.R
 	for _, edit := range request.Edits {
 		params.Edits = append(params.Edits, contentmapper.GeneratedEdit{ID: edit.ID, Projection: edit.Projection, Start: edit.Change.Pos(), End: edit.Change.End(), NewText: edit.Change.NewText})
 	}
+	for _, effect := range request.Effects {
+		params.Effects = append(params.Effects, contentmapper.RenameEffect{ID: effect.ID, Projection: effect.Projection, Start: effect.Span.Pos(), End: effect.Span.End(), Inputs: effect.Inputs})
+	}
 	result, err := r.editor.ProjectEdits(ctx, r.mapper, params)
 	if err != nil {
 		return editprojection.Response{}, err
@@ -101,7 +108,7 @@ func (r *mapperEditRoute) provider(ctx context.Context, request editprojection.R
 	}
 	response := editprojection.Response{Snapshot: result.Snapshot}
 	for _, result := range result.Results {
-		coverage := editprojection.Result{Inputs: result.Inputs, GeneratedOnly: result.GeneratedOnly, Reason: result.Reason}
+		coverage := editprojection.Result{Inputs: result.Inputs, GeneratedOnly: result.GeneratedOnly, Reason: result.Reason, DerivedEffects: result.DerivedEffects}
 		for _, edit := range result.Edits {
 			// Validate wire integers before narrowing them to core.TextPos (int32).
 			valid := false
@@ -328,7 +335,12 @@ func (s *Server) mapperRenameWork(ctx context.Context, params *lsproto.RenamePar
 			return
 		}
 		var programs []*compiler.Program
-		routes := make(map[*ast.SourceFile]*mapperEditRoute)
+		type routeKey struct {
+			file    *ast.SourceFile
+			context string
+		}
+		routes := make(map[routeKey]*mapperEditRoute)
+		var views []editprojection.SourceProjection
 		for _, proj := range snapshot.ProjectCollection.LanguageServiceProjects() {
 			program := proj.GetProgram()
 			if program == nil {
@@ -336,9 +348,14 @@ func (s *Server) mapperRenameWork(ctx context.Context, params *lsproto.RenamePar
 			}
 			programs = append(programs, program)
 			for _, file := range program.GetSourceFiles() {
+				view := editprojection.SourceProjection{File: file, Context: proj.ID().String()}
 				if route := editRoute(program, file, editprojection.Rename); route != nil {
-					routes[file] = route
+					routes[routeKey{file, view.Context}] = route
+					// Context, not just transform identity, scopes mapper editing state.
+					view.Owner = route.owner(view.Context)
+					view.DerivedRename = route.editor.EditCapabilities(route.mapper).DerivedRename
 				}
+				views = append(views, view)
 			}
 		}
 		if len(routes) == 0 {
@@ -354,7 +371,7 @@ func (s *Server) mapperRenameWork(ctx context.Context, params *lsproto.RenamePar
 			// Keep the original LSP request immutable, including for any other consumers of it.
 			semanticParams := *params
 			origin := primary.GetProgram().GetSourceFile(params.TextDocument.Uri.FileName())
-			if route := routes[origin]; route != nil {
+			if route := routes[routeKey{origin, primary.ID().String()}]; route != nil {
 				if _, semanticParams.NewName, err = s.prepareMapperRename(ctx, snapshot, service, params.TextDocument.Uri, params.Position, route, &params.NewName); err != nil {
 					return response, err
 				}
@@ -368,8 +385,8 @@ func (s *Server) mapperRenameWork(ctx context.Context, params *lsproto.RenamePar
 			var sources []*ast.SourceFile
 			for i := range edits {
 				sources = append(sources, edits[i].File)
-				if route := routes[edits[i].File]; route != nil {
-					owner := route.mapper.Identity() + ":" + route.identity
+				if route := routes[routeKey{edits[i].File, edits[i].Context}]; route != nil {
+					owner := route.owner(edits[i].Context)
 					edits[i].Owner = owner
 					providers[owner] = route.provider
 				}
@@ -383,7 +400,7 @@ func (s *Server) mapperRenameWork(ctx context.Context, params *lsproto.RenamePar
 			if !validProjectedRenameName(semanticParams.NewName) {
 				return response, errors.New("edit projection: expected a canonical identifier")
 			}
-			plan, err := editprojection.NewPlan(editSnapshot(snapshot, programs), editprojection.Operation{Kind: editprojection.Rename, NewName: semanticParams.NewName}, edits)
+			plan, err := editprojection.NewPlan(editSnapshot(snapshot, programs), editprojection.Operation{Kind: editprojection.Rename, NewName: semanticParams.NewName}, edits, views...)
 			if err != nil {
 				return response, err
 			}

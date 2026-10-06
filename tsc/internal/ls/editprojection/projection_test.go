@@ -111,16 +111,17 @@ func TestProjectionExactFallbackAndUnicode(t *testing.T) {
 	for _, kind := range []spanmap.Kind{spanmap.KindVerbatim, spanmap.KindAtom} {
 		file := mappedFile("😀saveItem", "😀saveItem", kind)
 		plan, err := NewPlan(Snapshot{ID: "1"}, Operation{Kind: Rename, NewName: "nextItem"}, []SourceEdit{{File: file, Change: change(4, 12, "nextItem")}})
+		if kind == spanmap.KindAtom {
+			// A partial generated edit cannot account for the entire authored Atom.
+			assert.ErrorContains(t, err, "uncovered rename projection")
+			assert.Assert(t, plan == nil)
+			continue
+		}
 		assert.NilError(t, err)
 		result, err := plan.Project(t.Context(), nil, func() string { return "1" }, lsproto.PositionEncodingKindUTF16)
-		if kind == spanmap.KindAtom {
-			assert.Assert(t, err != nil)
-			assert.Assert(t, result == nil)
-		} else {
-			assert.NilError(t, err)
-			edit := (*result.DocumentChanges)[0].TextDocumentEdit.Edits[0].TextEdit
-			assert.Equal(t, edit.Range.Start.Character, uint32(2))
-		}
+		assert.NilError(t, err)
+		edit := (*result.DocumentChanges)[0].TextDocumentEdit.Edits[0].TextEdit
+		assert.Equal(t, edit.Range.Start.Character, uint32(2))
 	}
 }
 

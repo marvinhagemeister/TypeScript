@@ -34,7 +34,15 @@ func (l *LanguageService) getRenameEditPlan(ctx context.Context, params *lsproto
 	if err != nil {
 		return nil, err
 	}
-	return editprojection.NewPlan(snapshot, editprojection.Operation{Kind: editprojection.Rename, NewName: params.NewName}, edits)
+	var views []editprojection.SourceProjection
+	for _, file := range l.program.GetSourceFiles() {
+		view := editprojection.SourceProjection{File: file}
+		if l.projectID != nil {
+			view.Context = l.projectID.String()
+		}
+		views = append(views, view)
+	}
+	return editprojection.NewPlan(snapshot, editprojection.Operation{Kind: editprojection.Rename, NewName: params.NewName}, edits, views...)
 }
 
 func TestProjectedRenameMixedSpellings(t *testing.T) {

@@ -67,6 +67,8 @@ type OpenProjectParams struct {
 	CompilerOptions json.Value `json:"compilerOptions"`
 	// EditProjectionVersion advertises the optional editing protocol the host understands.
 	EditProjectionVersion int `json:"editProjectionVersion,omitempty"`
+	// DerivedRename advertises support for operation-scoped collateral accounting.
+	DerivedRename bool `json:"derivedRename,omitempty"`
 }
 
 // OpenProjectResult is the mapper's response to an openProject request. ConfigIdentity and WatchedFiles
@@ -671,6 +673,7 @@ func (h *host) openProjectLocked(ctx context.Context, entry *projectEntry) error
 		Options:               entry.mapper.Options,
 		CompilerOptions:       compilerOptions,
 		EditProjectionVersion: EditProjectionVersion,
+		DerivedRename:         true,
 	})
 	mapperTiming.finishRequest(&mapperTiming.openProject, start)
 	if err != nil {
@@ -691,7 +694,7 @@ func (h *host) openProjectLocked(ctx context.Context, entry *projectEntry) error
 	}
 	entry.editProjection = EditProjectionCapabilities{}
 	if result.EditProjection != nil {
-		if result.EditProjection.Version != EditProjectionVersion || result.EditProjection.RenameInput && !result.EditProjection.Rename {
+		if result.EditProjection.Version != EditProjectionVersion || (result.EditProjection.RenameInput || result.EditProjection.DerivedRename) && !result.EditProjection.Rename {
 			return &ProjectError{Kind: ProjectErrorKindMalformedResponse}
 		}
 		entry.editProjection = *result.EditProjection

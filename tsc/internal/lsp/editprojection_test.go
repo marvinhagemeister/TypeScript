@@ -43,7 +43,7 @@ func TestEditProjectionMapperProcess(t *testing.T) {
 	if os.Getenv("TS_EDIT_MAPPER_PROCESS") != "1" {
 		return
 	}
-	conn := ipc.NewAsyncConn(mapperStdio{os.Stdin, os.Stdout}, &rpcEditMapper{})
+	conn := ipc.NewAsyncConn(mapperStdio{os.Stdin, os.Stdout}, &rpcEditMapper{mode: os.Getenv("TS_EDIT_MAPPER_MODE")})
 	_ = conn.Run(context.Background())
 	os.Exit(0)
 }
@@ -72,13 +72,16 @@ func (p *mapperChild) Close() error {
 	return nil
 }
 
-func spawnEditMapper(_ []string, _ string, stderr io.Writer) (io.ReadWriteCloser, error) {
+func spawnEditMapper(args []string, _ string, stderr io.Writer) (io.ReadWriteCloser, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
 	cmd := exec.Command(executable, "-test.run=^TestEditProjectionMapperProcess$")
 	cmd.Env = append(os.Environ(), "TS_EDIT_MAPPER_PROCESS=1")
+	if slices.Contains(args, "--derived") {
+		cmd.Env = append(cmd.Env, "TS_EDIT_MAPPER_MODE=derived")
+	}
 	cmd.Stderr = stderr
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -102,6 +105,8 @@ type rpcEditMapper struct {
 	onProject     func(contentmapper.ProjectEditsParams)
 	onPrepare     func(contentmapper.PrepareRenameParams)
 	prepareResult func(contentmapper.PrepareRenameParams) (contentmapper.PrepareRenameResult, error)
+	projectResult func(contentmapper.ProjectEditsParams) (contentmapper.ProjectEditsResult, error)
+	openProject   func(contentmapper.OpenProjectParams)
 }
 
 func (*rpcEditMapper) HandleNotification(context.Context, string, json.Value) error { return nil }
@@ -114,12 +119,18 @@ func (h *rpcEditMapper) HandleRequest(ctx context.Context, method string, raw js
 		if err := json.Unmarshal(raw, &params); err != nil {
 			return nil, err
 		}
+		if strings.HasPrefix(h.mode, "derived") && !params.DerivedRename {
+			return nil, errors.New("host did not advertise derived rename")
+		}
 		if params.EditProjectionVersion != contentmapper.EditProjectionVersion {
 			return nil, errors.New("host did not advertise editing")
 		}
+		if h.openProject != nil {
+			h.openProject(params)
+		}
 		result := contentmapper.OpenProjectResult{}
 		if h.mode != "legacy" {
-			result.EditProjection = &contentmapper.EditProjectionCapabilities{Version: contentmapper.EditProjectionVersion, Rename: true, OrganizeImports: true, RenameInput: h.mode != "canonical-input"}
+			result.EditProjection = &contentmapper.EditProjectionCapabilities{Version: contentmapper.EditProjectionVersion, Rename: true, OrganizeImports: true, RenameInput: h.mode != "canonical-input", DerivedRename: strings.HasPrefix(h.mode, "derived") && h.mode != "derived-disabled"}
 		}
 		return result, nil
 	case contentmapper.MethodCloseProject:
@@ -175,6 +186,9 @@ func (h *rpcEditMapper) HandleRequest(ctx context.Context, method string, raw js
 			transform = contentmappertest.ImportTransform
 		}
 		result := transform(params.Content)
+		if strings.HasPrefix(h.mode, "derived") {
+			result = derivedListenerTransform(params.Content, h.mode == "derived-independent")
+		}
 		mapping, err := result.Mappings.Marshal()
 		if err != nil {
 			return nil, err
@@ -198,7 +212,13 @@ func (h *rpcEditMapper) HandleRequest(ctx context.Context, method string, raw js
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}
+		if h.projectResult != nil {
+			return h.projectResult(params)
+		}
 		result, err := projectEditFixture(params)
+		if strings.HasPrefix(h.mode, "derived") {
+			err = accountDerivedFixture(params, &result)
+		}
 		switch h.mode {
 		case "stale":
 			result.Snapshot = "old"

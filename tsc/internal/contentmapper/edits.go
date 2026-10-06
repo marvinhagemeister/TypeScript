@@ -24,6 +24,8 @@ type EditProjectionCapabilities struct {
 	OrganizeImports bool `json:"organizeImports,omitempty"`
 	// RenameInput opts into authored placeholders and execution-time input normalization. Requires Rename.
 	RenameInput bool `json:"renameInput,omitzero"`
+	// DerivedRename enables explicit accounting of collateral generated rename effects.
+	DerivedRename bool `json:"derivedRename,omitzero"`
 }
 
 // EditingProject is optional so compiler-only hosts need not implement editing RPCs.
@@ -79,6 +81,15 @@ type GeneratedEdit struct {
 	NewText    string `json:"newText"`
 }
 
+// RenameEffect is geometry affected by a semantic rename, not an additional semantic edit.
+type RenameEffect struct {
+	ID         int   `json:"id"`
+	Projection int   `json:"projection"`
+	Start      int   `json:"start"`
+	End        int   `json:"end"`
+	Inputs     []int `json:"inputs"`
+}
+
 type ProjectEditsParams struct {
 	ProjectHandle    string           `json:"projectHandle"`
 	Snapshot         string           `json:"snapshot"`
@@ -89,6 +100,7 @@ type ProjectEditsParams struct {
 	Documents        []EditDocument   `json:"documents"`
 	Projections      []EditProjection `json:"projections"`
 	Edits            []GeneratedEdit  `json:"edits"`
+	Effects          []RenameEffect   `json:"effects,omitempty"`
 }
 
 type AuthoredEdit struct {
@@ -99,10 +111,11 @@ type AuthoredEdit struct {
 }
 
 type EditCoverage struct {
-	Inputs        []int          `json:"inputs"`
-	Edits         []AuthoredEdit `json:"edits,omitempty"`
-	GeneratedOnly bool           `json:"generatedOnly,omitempty"`
-	Reason        string         `json:"reason,omitempty"`
+	DerivedEffects []int          `json:"derivedEffects,omitempty"`
+	Inputs         []int          `json:"inputs"`
+	Edits          []AuthoredEdit `json:"edits,omitempty"`
+	GeneratedOnly  bool           `json:"generatedOnly,omitempty"`
+	Reason         string         `json:"reason,omitempty"`
 }
 
 type ProjectEditsResult struct {

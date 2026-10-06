@@ -14,7 +14,6 @@ import (
 	"github.com/microsoft/TypeScript/tsc/internal/ls/lsutil"
 	"github.com/microsoft/TypeScript/tsc/internal/lsp/lsproto"
 	"github.com/microsoft/TypeScript/tsc/internal/spanmap"
-	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 )
 
 // PrepareProjectedRename is an experimental, opt-in counterpart to GetRenameInfo. It permits a
@@ -115,62 +114,12 @@ func (l *LanguageService) symbolAndEntriesToGeneratedEdits(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
-	if err := l.checkRenameProjectionCoverage(edits); err != nil {
-		return nil, err
+	for i := range edits {
+		if l.projectID != nil {
+			edits[i].Context = l.projectID.String()
+		}
 	}
 	return edits, nil
-}
-
-// An authored token can feed multiple generated symbols. Updating it for just one of them would
-// silently rename the others too. Require coverage even when the request starts in an ordinary .ts
-// file, and inspect geometry without feature masks (a hidden projection is still affected by edits).
-func (l *LanguageService) checkRenameProjectionCoverage(edits []editprojection.SourceEdit) error {
-	type occurrence struct {
-		file *ast.SourceFile
-		rng  core.TextRange
-	}
-	covered := make(map[occurrence]bool, len(edits))
-	originals := make(map[tspath.RootedFilePath]map[core.TextRange]bool)
-	for _, edit := range edits {
-		covered[occurrence{edit.File, edit.Change.TextRange}] = true
-		if edit.File.SpanMap() == nil {
-			continue
-		}
-		original, fidelity := edit.File.SpanMap().VirtualToOriginalSpan(edit.Change.TextRange)
-		if fidelity.IsNone() {
-			continue
-		}
-		if !fidelity.IsSingleSegment() {
-			return errors.New("edit projection: rename occurrence crosses mapping boundaries")
-		}
-		name := edit.File.OriginalFileName()
-		if originals[name] == nil {
-			originals[name] = make(map[core.TextRange]bool)
-		}
-		originals[name][original] = true
-	}
-	for _, file := range l.program.GetSourceFiles() {
-		ranges := originals[file.OriginalFileName()]
-		if len(ranges) == 0 || file.SpanMap() == nil {
-			continue
-		}
-		// Do not let presentation feature masks hide an affected projection. Intersections, rather
-		// than whole-range lookups, also include projections of only part of the authored token.
-		// The original map and its navigation fidelity are untouched.
-		segments := slices.Clone(file.SpanMap().Segments())
-		for i := range segments {
-			segments[i].Features = spanmap.FeatureAll
-		}
-		geometry := spanmap.New(segments)
-		for original := range ranges {
-			for _, mapped := range geometry.OriginalToVirtualIntersectingSpans(original, spanmap.FeatureAll) {
-				if !covered[occurrence{file, mapped.Span}] {
-					return errors.New("edit projection: ambiguous or uncovered rename projection")
-				}
-			}
-		}
-	}
-	return nil
 }
 
 func (l *LanguageService) materializeRenameEdits(ctx context.Context, file *ast.SourceFile, node *ast.Node, name string, symbols []*SymbolAndEntries) ([]editprojection.SourceEdit, error) {

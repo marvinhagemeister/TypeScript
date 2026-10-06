@@ -44,6 +44,17 @@ type SourceEdit struct {
 	Change core.TextChange
 	// Owner optionally scopes a provider to a particular mapper configuration.
 	Owner string
+	// Context distinguishes programs even when their cached SourceFile objects are shared.
+	Context string
+}
+
+// SourceProjection includes edit-free generated views of an authorized authored document.
+// Callers must supply every view in the frozen operation's projects.
+type SourceProjection struct {
+	File          *ast.SourceFile
+	Owner         string
+	Context       string
+	DerivedRename bool
 }
 
 type Document struct {
@@ -62,6 +73,7 @@ type Projection struct {
 	TransformIdentity string
 	Mappings          []spanmap.Segment
 	Mapped            bool
+	DerivedRename     bool
 }
 
 type GeneratedEdit struct {
@@ -78,6 +90,7 @@ type Request struct {
 	Documents   []Document
 	Projections []Projection
 	Edits       []GeneratedEdit
+	Effects     []RenameEffect
 }
 
 type AuthoredEdit struct {
@@ -85,11 +98,21 @@ type AuthoredEdit struct {
 	Change   core.TextChange
 }
 
+// RenameEffect is an affected generated span outside the native rename set. It is not an edit.
+// Inputs identifies semantic edits whose authored origins cause this effect.
+type RenameEffect struct {
+	ID         int
+	Projection int
+	Span       core.TextRange
+	Inputs     []int
+}
+
 type Result struct {
-	Inputs        []int
-	Edits         []AuthoredEdit
-	GeneratedOnly bool
-	Reason        string
+	DerivedEffects []int
+	Inputs         []int
+	Edits          []AuthoredEdit
+	GeneratedOnly  bool
+	Reason         string
 }
 
 type Response struct {
@@ -104,31 +127,44 @@ type Plan struct {
 	request Request
 }
 
-func NewPlan(snapshot Snapshot, operation Operation, edits []SourceEdit) (*Plan, error) {
+func NewPlan(snapshot Snapshot, operation Operation, edits []SourceEdit, views ...SourceProjection) (*Plan, error) {
 	if snapshot.ID == "" || operation.Kind != Rename && operation.Kind != OrganizeImports {
 		return nil, errors.New("edit projection: invalid snapshot or operation")
 	}
 	plan := &Plan{request: Request{Snapshot: snapshot.ID, Operation: operation}}
 	documents := make(map[tspath.RootedFilePath]int)
-	projections := make(map[*ast.SourceFile]int)
+	type viewKey struct {
+		file    *ast.SourceFile
+		context string
+	}
+	projections := make(map[viewKey]int)
 	identities := make(map[tspath.RootedFilePath]string)
-	for _, edit := range edits {
-		file := edit.File
-		if file == nil || file.IsContentMapperFailureStub() || !validRange(file.Text(), edit.Change.TextRange) {
-			return nil, errors.New("edit projection: invalid generated edit")
+	options := make(map[viewKey]SourceProjection)
+	for _, view := range views {
+		key := viewKey{view.File, view.Context}
+		if previous, exists := options[key]; exists && previous != view {
+			return nil, errors.New("edit projection: inconsistent projection context")
 		}
-		owner := edit.Owner
+		options[key] = view
+	}
+	register := func(view SourceProjection) (int, error) {
+		file := view.File
+		if file == nil || file.IsContentMapperFailureStub() {
+			return 0, errors.New("edit projection: invalid generated projection")
+		}
+		owner := view.Owner
 		if owner == "" {
 			owner = file.ContentMapper()
 		}
-		projectionID, exists := projections[file]
+		key := viewKey{file, view.Context}
+		projectionID, exists := projections[key]
 		if !exists {
 			name := file.OriginalFileName()
 			documentID, exists := documents[name]
 			if exists {
 				document := plan.request.Documents[documentID]
 				if document.Text != file.OriginalText() || document.Owner != owner || identities[name] != file.ContentMapperTransformIdentity() {
-					return nil, fmt.Errorf("edit projection: inconsistent projections for %s", name)
+					return 0, fmt.Errorf("edit projection: inconsistent projections for %s", name)
 				}
 			} else {
 				documentID = len(plan.request.Documents)
@@ -141,18 +177,57 @@ func NewPlan(snapshot Snapshot, operation Operation, edits []SourceEdit) (*Plan,
 				identities[name] = file.ContentMapperTransformIdentity()
 			}
 			projectionID = len(plan.request.Projections)
-			projection := Projection{ID: projectionID, Document: documentID, FileName: file.FileName(), Text: file.Text(), TransformIdentity: file.ContentMapperTransformIdentity()}
+			projection := Projection{ID: projectionID, Document: documentID, FileName: file.FileName(), Text: file.Text(), TransformIdentity: file.ContentMapperTransformIdentity(), DerivedRename: view.DerivedRename}
 			if mapping := file.SpanMap(); mapping != nil {
 				if err := mapping.Validate(file.Text(), file.OriginalText()); err != nil {
-					return nil, err
+					return 0, err
 				}
 				projection.Mapped = true
 				projection.Mappings = slices.Clone(mapping.Segments())
 			}
 			plan.request.Projections = append(plan.request.Projections, projection)
-			projections[file] = projectionID
+			projections[key] = projectionID
+		} else {
+			projection := plan.request.Projections[projectionID]
+			if plan.request.Documents[projection.Document].Owner != owner || projection.DerivedRename != view.DerivedRename {
+				return 0, errors.New("edit projection: inconsistent projection context")
+			}
 		}
-		plan.request.Edits = append(plan.request.Edits, GeneratedEdit{ID: len(plan.request.Edits), Projection: projectionID, Change: edit.Change})
+		return projectionID, nil
+	}
+	for _, edit := range edits {
+		if edit.File == nil || !validRange(edit.File.Text(), edit.Change.TextRange) {
+			return nil, errors.New("edit projection: invalid generated edit")
+		}
+		view := options[viewKey{edit.File, edit.Context}]
+		view.File, view.Context = edit.File, edit.Context
+		if edit.Owner != "" {
+			if view.Owner != "" && view.Owner != edit.Owner {
+				return nil, errors.New("edit projection: inconsistent projection context")
+			}
+			view.Owner = edit.Owner
+		}
+		id, err := register(view)
+		if err != nil {
+			return nil, err
+		}
+		plan.request.Edits = append(plan.request.Edits, GeneratedEdit{ID: len(plan.request.Edits), Projection: id, Change: edit.Change})
+	}
+	for _, view := range views {
+		if view.File == nil {
+			return nil, errors.New("edit projection: invalid generated projection")
+		}
+		if _, authorized := documents[view.File.OriginalFileName()]; !authorized {
+			continue
+		}
+		if _, err := register(view); err != nil {
+			return nil, err
+		}
+	}
+	if operation.Kind == Rename {
+		if err := plan.collectRenameEffects(); err != nil {
+			return nil, err
+		}
 	}
 	return plan, nil
 }
@@ -175,6 +250,12 @@ func (p *Plan) Project(ctx context.Context, providers map[string]Provider, curre
 	}
 	if encoding != lsproto.PositionEncodingKindUTF8 && encoding != lsproto.PositionEncodingKindUTF16 {
 		return nil, errors.New("edit projection: unsupported position encoding")
+	}
+	for _, effect := range p.request.Effects {
+		owner := p.request.Documents[p.request.Projections[effect.Projection].Document].Owner
+		if owner == "" || providers[owner] == nil {
+			return nil, errors.New("edit projection: no provider for required derived effect")
+		}
 	}
 	batches := make(map[string][]GeneratedEdit)
 	var authored []AuthoredEdit
@@ -249,6 +330,12 @@ func (p *Plan) batch(owner string, edits []GeneratedEdit) Request {
 			request.Projections = append(request.Projections, projection)
 		}
 	}
+	for _, effect := range p.request.Effects {
+		if p.request.Documents[p.request.Projections[effect.Projection].Document].Owner == owner {
+			effect.Inputs = slices.Clone(effect.Inputs)
+			request.Effects = append(request.Effects, effect)
+		}
+	}
 	return request
 }
 
@@ -261,8 +348,13 @@ func (p *Plan) validateResponse(owner string, batch []GeneratedEdit, response Re
 		remaining[edit.ID] = edit
 	}
 	var edits []AuthoredEdit
+	if p.request.Operation.Kind == Rename {
+		if err := p.validateRenameResponse(owner, batch, response); err != nil {
+			return nil, err
+		}
+	}
 	for _, result := range response.Results {
-		if len(result.Inputs) == 0 || result.GeneratedOnly && (len(result.Edits) != 0 || result.Reason == "") || !result.GeneratedOnly && len(result.Edits) == 0 {
+		if len(result.Inputs) == 0 || result.GeneratedOnly && (len(result.Edits) != 0 || len(result.DerivedEffects) != 0 || result.Reason == "") || !result.GeneratedOnly && len(result.Edits) == 0 || p.request.Operation.Kind != Rename && len(result.DerivedEffects) != 0 {
 			return nil, errors.New("edit projection: invalid coverage result")
 		}
 		for _, id := range result.Inputs {
